@@ -1,0 +1,100 @@
+# Built-in settings; ~/.elorus/config.toml, .elorus/config.toml and flags override them in that
+# order. `[[permission]]` rules are appended instead, and the last matching rule wins.
+model = "deepseek-v4.1-flash"
+mode = "manual"
+# Off by default until elorus has a release channel of its own. Set it to true to check daily
+# during interactive sessions; `elorus update` does it now either way.
+auto_update = false
+# Offer the MCP servers other apps list (Claude Desktop, Cursor, VS Code, …; data/mcp_sources.toml),
+# each asked about once.
+mcp_discovery = true
+
+[[permission]]
+permission = "*"
+pattern = "*"
+action = "ask"
+
+[[permission]]
+permission = "read"
+pattern = "*"
+action = "allow"
+
+# Secrets: reading them still asks.
+[[permission]]
+permission = "read"
+pattern = "*.env"
+action = "ask"
+
+[[permission]]
+permission = "read"
+pattern = "*.env.*"
+action = "ask"
+
+[[permission]]
+permission = "search"
+pattern = "*"
+action = "allow"
+
+# grep and glob read contents too; a secret as their root asks like a read does.
+[[permission]]
+permission = "search"
+pattern = "*.env"
+action = "ask"
+
+[[permission]]
+permission = "search"
+pattern = "*.env.*"
+action = "ask"
+
+# Inspection runs without asking (data/command_lists.toml, the list PLAN locks open too); a flag
+# that makes it write or run another program asks again.
+[[permission]]
+permission = "bash"
+action = "allow"
+list = "inspect"
+
+[[permission]]
+permission = "bash"
+action = "ask"
+list = "unsafe_flags"
+
+# Forum reads run unasked. A post shows the exact text and asks every time, even in AUTO. Deny
+# either per host, e.g. permission = "forum_post", pattern = "*", action = "deny".
+[[permission]]
+permission = "forum"
+pattern = "*"
+action = "allow"
+
+[[permission]]
+permission = "forum_post"
+pattern = "*"
+action = "allow"
+
+[[permission]]
+permission = "todo"
+pattern = "*"
+action = "allow"
+
+# Asking the user and handing over a plan are conversations, not actions.
+[[permission]]
+permission = "question"
+pattern = "*"
+action = "allow"
+
+[[permission]]
+permission = "plan_exit"
+pattern = "*"
+action = "allow"
+
+# A subagent asks for each of its own calls as the agent would.
+[[permission]]
+permission = "task"
+pattern = "*"
+action = "allow"
+
+# An MCP tool asks as `mcp <server>__<tool>`, so `pattern = "github__*"` allows a server's tools.
+# Its `mcp_write` ask is for PLAN's lock and /undo, and is left to `mcp` here.
+[[permission]]
+permission = "mcp_write"
+pattern = "*"
+action = "allow"

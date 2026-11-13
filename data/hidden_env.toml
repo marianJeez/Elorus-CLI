@@ -1,0 +1,13 @@
+# Variables no program elorus starts may inherit, the model's commands and MCP servers alike:
+# none of them may read elorus's own key, or a provider's, out of the environment.
+names = [
+  "ELORUS_API_KEY",
+  "OPENAI_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "OPENROUTER_API_KEY",
+  "DEEPSEEK_API_KEY",
+  "GEMINI_API_KEY",
+  "GROQ_API_KEY",
+  "MISTRAL_API_KEY",
+  "XAI_API_KEY",
+]

@@ -1,0 +1,12 @@
+# `elorus update` and the start-of-session notice; {placeholders} are filled in.
+[text]
+updated = "elorus updated to {to} (from {from})."
+up_to_date = "Already the newest release, {tag}."
+development = "A development build has no release to update from; install a release to get updates."
+listing = "The release list did not load: {error}"
+no_platform = "Releases have no build for this platform ({os} {arch})."
+missing = "Release {tag} has no {file}."
+not_writable = "Cannot write to {dir}; update elorus with whatever installed it."
+mismatch = "{file} does not match its checksum; nothing changed."
+unsigned = "{file} of {tag} does not carry elorus's signature for that release; nothing changed."
+http = "{url} answered {status}."

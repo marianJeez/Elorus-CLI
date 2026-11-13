@@ -1,0 +1,43 @@
+//! Typed access to data/model_text.toml, so a missing string fails the tests, not a session.
+
+use std::sync::LazyLock;
+
+use serde::Deserialize;
+
+use crate::data;
+
+static TEXT: LazyLock<ModelText> = data::load!("model_text.toml");
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelText {
+    pub no_result: String,
+    pub truncated_tool_call: String,
+    pub unknown_tool: String,
+    pub bad_json: String,
+    pub invalid_arguments: String,
+    pub denied: String,
+    pub rejected: String,
+    pub rejected_with_feedback: String,
+    pub non_interactive: String,
+    pub unconfirmed: String,
+    pub doom_loop: String,
+    pub written_calls: String,
+    pub mode_left: String,
+    pub plan_unfinished: String,
+    pub verify_failed: String,
+    pub compact_focus: String,
+    pub compacted: String,
+}
+
+pub fn get() -> &'static ModelText {
+    &TEXT
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn parses() {
+        assert!(!super::get().no_result.is_empty());
+    }
+}

@@ -1,0 +1,4 @@
+name = "install"
+summary = "Install elorus for this user and put it on your PATH"
+usage = "install"
+scope = ["cli"]

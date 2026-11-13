@@ -1,0 +1,40 @@
+# A Windows terminal reports Ctrl+letter as the letter of the active keyboard layout, not the
+# Latin one (crossterm asks ToUnicodeEx without the control state), so Ctrl+D in a Cyrillic
+# layout arrives as `в`. Each table maps a layout's letters back to the QWERTY key that sends
+# them; io/term/input.rs applies it to every Ctrl+letter, so Ctrl+d, Ctrl+c and the editor's
+# Ctrl+a/e/w keep working in any layout. Adding a layout is adding a table.
+
+[cyrillic]
+"й" = "q"
+"ц" = "w"
+"у" = "e"
+"к" = "r"
+"е" = "t"
+"н" = "y"
+"г" = "u"
+"ш" = "i"
+"щ" = "o"
+"з" = "p"
+"х" = "["
+"ъ" = "]"
+"ф" = "a"
+"ы" = "s"
+"в" = "d"
+"а" = "f"
+"п" = "g"
+"р" = "h"
+"о" = "j"
+"л" = "k"
+"д" = "l"
+"ж" = ";"
+"э" = "'"
+"я" = "z"
+"ч" = "x"
+"с" = "c"
+"м" = "v"
+"и" = "b"
+"т" = "n"
+"ь" = "m"
+"б" = ","
+"ю" = "."
+"." = "/"

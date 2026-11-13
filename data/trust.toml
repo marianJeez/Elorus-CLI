@@ -1,0 +1,15 @@
+# What a project's .elorus/config.toml may set before the folder is trusted: what elorus runs on,
+# never what it may do (mode or shell could run commands unasked). Deny rules are kept too.
+untrusted_keys = ["model", "effort"]
+
+# Settings whose values may be secrets (an MCP server's environment and headers): listed by name,
+# never by value, wherever what an untrusted folder asked for is shown. `mask` stands for each.
+masked = ["env", "headers"]
+mask = "…"
+
+# What elorus says when a project's config sets what only a trusted folder may.
+warning = "{file} changes what elorus may do without asking:"
+danger = "A malicious repository can use this to run commands without asking."
+question = "Trust this folder and use these settings?"
+declined = "Not trusted; ignoring them."
+ignored = "ignoring {keys} from {file}: the folder isn't trusted. Start elorus here in a terminal to trust it."

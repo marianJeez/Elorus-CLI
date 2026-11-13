@@ -1,0 +1,396 @@
+//! File search, embedded from ripgrep's crates so nothing needs downloading. Honors .gitignore.
+//! `glob` and `grep` run off the async threads themselves.
+
+use std::collections::HashSet;
+use std::fmt;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+use globset::{GlobBuilder, GlobMatcher};
+use grep_regex::RegexMatcherBuilder;
+use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
+use ignore::WalkBuilder;
+
+pub struct Found {
+    pub path: PathBuf,
+    pub modified: Option<SystemTime>,
+}
+
+/// What a content search reports about each file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Report {
+    /// The matching lines, with this many lines of context before and after each.
+    Lines { context: usize },
+    /// Only that the file matched; each file stops at its first match.
+    Files,
+    /// How many lines matched.
+    Counts,
+}
+
+/// One file's part of a search: its lines (matches and their context) under `Report::Lines`, and
+/// how many lines matched.
+pub struct FileHits {
+    pub path: PathBuf,
+    pub lines: Vec<HitLine>,
+    pub matched: usize,
+}
+
+pub struct HitLine {
+    pub number: u64,
+    pub text: String,
+    /// False for a line shown as context.
+    pub matched: bool,
+}
+
+/// Why a search did not run.
+#[derive(Debug)]
+pub enum SearchError {
+    /// The glob or regex does not compile.
+    BadPattern(String),
+    Failed(String),
+}
+
+impl fmt::Display for SearchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BadPattern(why) => write!(f, "Bad pattern: {why}"),
+            Self::Failed(why) => f.write_str(why),
+        }
+    }
+}
+
+/// Files under `root` matching `pattern`. A pattern without `/` matches file names at any depth.
+pub async fn glob(root: PathBuf, pattern: String) -> Result<Vec<Found>, SearchError> {
+    off_thread(move || glob_in(&root, &pattern)).await
+}
+
+/// The files that matched, in walk order, and whether the search stopped at `max`.
+pub async fn grep(query: Grep) -> Result<(Vec<FileHits>, bool), SearchError> {
+    off_thread(move || grep_in(&query)).await
+}
+
+async fn off_thread<T: Send + 'static>(
+    search: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, SearchError> {
+    match tokio::task::spawn_blocking(search).await {
+        Ok(found) => found.map_err(SearchError::BadPattern),
+        Err(e) => Err(SearchError::Failed(e.to_string())),
+    }
+}
+
+/// The files under `root` the walk keeps: .gitignore honoured, hidden ones skipped.
+fn walk_files(root: &Path) -> impl Iterator<Item = ignore::DirEntry> {
+    WalkBuilder::new(root)
+        .build()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_some_and(|t| t.is_file()))
+}
+
+fn glob_in(root: &Path, pattern: &str) -> Result<Vec<Found>, String> {
+    let matcher = compile(pattern)?;
+    let by_name = !pattern.contains('/');
+    let mut found = Vec::new();
+    for entry in walk_files(root) {
+        let path = entry.path();
+        let relative = relative_slashes(root, path);
+        let hit = matcher.is_match(&relative)
+            || (by_name
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|n| matcher.is_match(n)));
+        if hit {
+            found.push(Found {
+                path: path.to_path_buf(),
+                modified: entry.metadata().ok().and_then(|m| m.modified().ok()),
+            });
+        }
+    }
+    Ok(found)
+}
+
+pub struct TreeEntry {
+    pub name: String,
+    /// 1 for an entry of `root` itself.
+    pub depth: usize,
+    pub is_dir: bool,
+}
+
+/// What lies under `root`, `depth` levels down, in tree order with each directory's entries by
+/// name, less what .gitignore ignores and `.git` itself.
+pub fn tree(root: &Path, depth: usize) -> Vec<TreeEntry> {
+    WalkBuilder::new(root)
+        .max_depth(Some(depth))
+        .hidden(false)
+        .filter_entry(|e| e.file_name() != ".git")
+        .sort_by_file_name(|a, b| a.cmp(b))
+        .build()
+        .filter_map(Result::ok)
+        .filter(|e| e.depth() > 0)
+        .map(|e| TreeEntry {
+            name: e.file_name().to_string_lossy().into_owned(),
+            depth: e.depth(),
+            is_dir: e.file_type().is_some_and(|t| t.is_dir()),
+        })
+        .collect()
+}
+
+pub struct Grep {
+    /// Files and directories searched in turn; a file under two of them is searched once.
+    pub roots: Vec<PathBuf>,
+    pub pattern: String,
+    pub glob: Option<String>,
+    pub ignore_case: bool,
+    pub report: Report,
+    /// Stop after this many matching lines (`Lines`) or files (`Files`, `Counts`).
+    pub max: usize,
+}
+
+fn grep_in(query: &Grep) -> Result<(Vec<FileHits>, bool), String> {
+    let matcher = RegexMatcherBuilder::new()
+        .case_insensitive(query.ignore_case)
+        .build(&query.pattern)
+        .map_err(|e| e.to_string())?;
+    let filter = query.glob.as_deref().map(compile).transpose()?;
+    let context = match query.report {
+        Report::Lines { context } => context,
+        Report::Files | Report::Counts => 0,
+    };
+    let mut searcher = SearcherBuilder::new()
+        .binary_detection(BinaryDetection::quit(b'\x00'))
+        .line_number(true)
+        .before_context(context)
+        .after_context(context)
+        .build();
+    let mut files: Vec<FileHits> = Vec::new();
+    let mut lines = 0;
+    let mut seen = HashSet::new();
+    let entries = query
+        .roots
+        .iter()
+        .flat_map(|root| walk_files(root).map(move |entry| (root, entry)));
+    for (root, entry) in entries {
+        let path = entry.path();
+        if !seen.insert(path.to_path_buf()) {
+            continue;
+        }
+        if let Some(filter) = &filter {
+            let relative = relative_slashes(root, path);
+            let name = entry.file_name().to_string_lossy();
+            if !filter.is_match(&relative) && !filter.is_match(name.as_ref()) {
+                continue;
+            }
+        }
+        let mut sink = Collect {
+            report: query.report,
+            lines: Vec::new(),
+            matched: 0,
+            room: query.max.saturating_sub(lines),
+        };
+        let _ = searcher.search_path(&matcher, path, &mut sink);
+        if sink.matched == 0 {
+            continue;
+        }
+        lines += sink.matched;
+        files.push(FileHits {
+            path: path.to_path_buf(),
+            lines: sink.lines,
+            matched: sink.matched,
+        });
+        let reached = match query.report {
+            Report::Lines { .. } => lines,
+            Report::Files | Report::Counts => files.len(),
+        };
+        if reached >= query.max {
+            return Ok((files, true));
+        }
+    }
+    Ok((files, false))
+}
+
+/// Gathers one file's matches for `grep`.
+struct Collect {
+    report: Report,
+    lines: Vec<HitLine>,
+    matched: usize,
+    /// Matching lines the search may still take before its cap.
+    room: usize,
+}
+
+impl Collect {
+    fn push(&mut self, number: Option<u64>, bytes: &[u8], matched: bool) {
+        self.lines.push(HitLine {
+            number: number.unwrap_or(0),
+            text: String::from_utf8_lossy(bytes)
+                .trim_end_matches(['\n', '\r'])
+                .to_owned(),
+            matched,
+        });
+    }
+}
+
+impl Sink for Collect {
+    type Error = std::io::Error;
+
+    fn matched(&mut self, _: &Searcher, m: &SinkMatch<'_>) -> Result<bool, Self::Error> {
+        self.matched += 1;
+        match self.report {
+            Report::Files => Ok(false),
+            Report::Counts => Ok(true),
+            Report::Lines { .. } => {
+                self.push(m.line_number(), m.bytes(), true);
+                Ok(self.matched < self.room)
+            }
+        }
+    }
+
+    fn context(&mut self, _: &Searcher, c: &SinkContext<'_>) -> Result<bool, Self::Error> {
+        self.push(c.line_number(), c.bytes(), false);
+        Ok(true)
+    }
+}
+
+fn compile(pattern: &str) -> Result<GlobMatcher, String> {
+    GlobBuilder::new(pattern)
+        .literal_separator(true)
+        .build()
+        .map(|g| g.compile_matcher())
+        .map_err(|e| e.to_string())
+}
+
+fn relative_slashes(root: &Path, path: &Path) -> String {
+    super::fs::slashed(path.strip_prefix(root).unwrap_or(path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tree() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (path, text) in [
+            ("src/main.rs", "fn main() {\n    run();\n}\n"),
+            ("src/lib/util.rs", "pub fn run() {}\n"),
+            ("notes.md", "run the thing\n"),
+            ("target/junk.rs", "fn run() {}\n"),
+            (".gitignore", "target/\n"),
+        ] {
+            crate::io::fs::write_atomic(
+                &dir.path().join(path),
+                text.as_bytes(),
+                crate::io::fs::Access::Shared,
+            )
+            .unwrap();
+        }
+        // `ignore` only applies .gitignore inside a git repository.
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        dir
+    }
+
+    fn names(found: &[PathBuf], root: &Path) -> Vec<String> {
+        let mut names: Vec<String> = found.iter().map(|p| relative_slashes(root, p)).collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn glob_matches_names_anywhere_and_paths_exactly() {
+        let dir = tree();
+        let all: Vec<PathBuf> = glob_in(dir.path(), "*.rs")
+            .unwrap()
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+        assert_eq!(
+            names(&all, dir.path()),
+            vec!["src/lib/util.rs", "src/main.rs"]
+        );
+        let top: Vec<PathBuf> = glob_in(dir.path(), "src/*.rs")
+            .unwrap()
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+        assert_eq!(names(&top, dir.path()), vec!["src/main.rs"]);
+    }
+
+    #[test]
+    fn tree_goes_down_in_order_and_skips_what_git_ignores() {
+        let dir = tree();
+        let shown: Vec<String> = super::tree(dir.path(), 2)
+            .iter()
+            .map(|e| {
+                format!(
+                    "{}{}{}",
+                    "  ".repeat(e.depth - 1),
+                    e.name,
+                    if e.is_dir { "/" } else { "" }
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [".gitignore", "notes.md", "src/", "  lib/", "  main.rs"]
+        );
+    }
+
+    #[test]
+    fn grep_finds_lines_respects_filters_and_caps() {
+        let dir = tree();
+        let query = Grep {
+            roots: vec![dir.path().to_path_buf()],
+            pattern: r"\brun\b".into(),
+            glob: Some("*.rs".into()),
+            ignore_case: false,
+            report: Report::Lines { context: 0 },
+            max: 10,
+        };
+        let (hits, truncated) = grep_in(&query).unwrap();
+        assert!(!truncated);
+        let mut lines: Vec<String> = hits
+            .iter()
+            .flat_map(|f| {
+                let name = relative_slashes(dir.path(), &f.path);
+                f.lines.iter().map(move |l| format!("{name}:{}", l.number))
+            })
+            .collect();
+        lines.sort();
+        assert_eq!(lines, vec!["src/lib/util.rs:1", "src/main.rs:2"]);
+        let (capped, truncated) = grep_in(&Grep {
+            max: 1,
+            glob: None,
+            ..query
+        })
+        .unwrap();
+        assert_eq!(capped.len(), 1);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn grep_reports_context_files_or_counts() {
+        let dir = tree();
+        let query = |report| Grep {
+            roots: vec![dir.path().to_path_buf()],
+            pattern: "run".into(),
+            glob: Some("main.rs".into()),
+            ignore_case: false,
+            report,
+            max: 10,
+        };
+        let (hits, _) = grep_in(&query(Report::Lines { context: 1 })).unwrap();
+        let shown: Vec<(u64, bool)> = hits[0]
+            .lines
+            .iter()
+            .map(|l| (l.number, l.matched))
+            .collect();
+        assert_eq!(shown, [(1, false), (2, true), (3, false)]);
+        let (hits, _) = grep_in(&query(Report::Files)).unwrap();
+        assert!(hits[0].lines.is_empty() && hits[0].matched == 1);
+        let (hits, _) = grep_in(&Grep {
+            glob: None,
+            ..query(Report::Counts)
+        })
+        .unwrap();
+        let total: usize = hits.iter().map(|f| f.matched).sum();
+        assert_eq!((hits.len(), total), (3, 3));
+    }
+}

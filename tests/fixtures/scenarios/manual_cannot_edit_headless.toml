@@ -1,0 +1,23 @@
+description = "MANUAL asks before editing; a headless run cannot answer, so the edit is declined"
+args = ["-p", "fix the sum"]
+project = "calc"
+
+[[reply]]
+calls = [{ name = "read", arguments = '{"path": "src/calc.txt"}' }]
+
+[[reply]]
+calls = [{ name = "edit", arguments = '{"path": "src/calc.txt", "edits": [{"old_text": "2 + 2 = 5", "new_text": "2 + 2 = 4"}]}' }]
+
+[[reply]]
+text = 'I could not edit it without permission.'
+
+[expect]
+exit = 0
+stderr_contains = ["needs permission", "--mode auto"]
+files = { "src/calc.txt" = "2 + 2 = 5\n" }
+
+[[expect.requests]]
+index = 2
+message = -1
+role = "tool"
+contains = "nobody can answer"

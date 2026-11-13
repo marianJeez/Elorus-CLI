@@ -1,0 +1,29 @@
+# Release file per platform, keyed by std::env::consts OS and ARCH. Assets are `elorus-<target>`;
+# a test checks them against ci.yml. The website's src/elorus/content/cli.yaml lists the same
+# files: change both.
+sums = "SHA256SUMS"
+
+# The checksums are signed with minisign when a release is published (release.yml), and the
+# updater takes no release whose signature fails. `keys`: the public keys any of which may sign; a
+# new one joins beside the old for a release before the old one goes. `comment`: the trusted
+# comment each signature carries, so one release's checksums cannot pass for another's.
+[signature]
+file = "SHA256SUMS.minisig"
+keys = ["RWQysXAAlRXCH6bClaGBbW3QCKbBWWNW6SjGvcetrm183kruQ5NxjgxT"]
+# The matching secret key is never in the repository: it lives in the release environment.
+comment = "elorus release {tag}"
+
+[[asset]]
+os = "linux"
+arch = "x86_64"
+file = "elorus-x86_64-unknown-linux-musl"
+
+[[asset]]
+os = "macos"
+arch = "aarch64"
+file = "elorus-aarch64-apple-darwin"
+
+[[asset]]
+os = "windows"
+arch = "x86_64"
+file = "elorus-x86_64-pc-windows-msvc.exe"

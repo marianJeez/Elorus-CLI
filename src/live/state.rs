@@ -1,0 +1,222 @@
+//! Session state shared by a run and the frontend driving it, which may change it mid-run.
+
+use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use tokio_util::sync::CancellationToken;
+
+use crate::api::account::Me;
+use crate::conversation::message::Part;
+use crate::live::files::Files;
+use crate::live::prompt::Prompts;
+use crate::mode::Mode;
+
+/// A mode change the model has to hear about.
+pub enum Reminder {
+    /// A mode with instructions of its own.
+    Entered(&'static Mode),
+    /// Out of a mode with instructions, into one without, so they no longer hold.
+    Left { now: &'static Mode },
+    /// Still in a mode that repeats a line of its instructions with every message.
+    Still(&'static Mode),
+}
+
+pub struct Shared {
+    cancel: Mutex<CancellationToken>,
+    /// A subagent's runs end with the run that started it.
+    under: Option<CancellationToken>,
+    steer: Mutex<VecDeque<Vec<Part>>>,
+    follow: Mutex<VecDeque<Vec<Part>>>,
+    /// Shared with subagents, so the frontend answers their prompts as it answers these.
+    pub prompts: Arc<Prompts>,
+    /// Shared with subagents, so a switch reaches them mid-run.
+    mode: Arc<Mutex<&'static Mode>>,
+    /// Where the account stood when the frontend last asked, for a preset's conditions; shared
+    /// with subagents, as the mode is.
+    account: Arc<Mutex<Option<Me>>>,
+    /// The mode the model was last told about.
+    reminded: Mutex<Option<&'static Mode>>,
+    /// A `cd` the model made that should carry to the next bash call; `None` is the project dir.
+    cwd: Mutex<Option<PathBuf>>,
+    /// Whether the model has been handed the opening orientation (dir listing, git) this session.
+    oriented: Mutex<bool>,
+    pub files: Files,
+}
+
+impl Shared {
+    pub fn new(mode: &'static Mode) -> Self {
+        Self {
+            cancel: Mutex::new(CancellationToken::new()),
+            under: None,
+            steer: Mutex::default(),
+            follow: Mutex::default(),
+            prompts: Arc::default(),
+            mode: Arc::new(Mutex::new(mode)),
+            account: Arc::default(),
+            reminded: Mutex::default(),
+            cwd: Mutex::default(),
+            oriented: Mutex::new(false),
+            files: Files::default(),
+        }
+    }
+
+    /// A subagent's, stopped with `under`, the run that starts it. It asks the user through the
+    /// same prompts, under the parent's mode unless that mode lets kinds bring their own and
+    /// `mode` gives it one; the messages typed for that run stay that run's.
+    // CEILING: a subagent gets no mode reminder of its own; a kind's prompt may name the mode it
+    // runs in, but not its locks. Upgrade: a reminder per kind, worded for a subagent.
+    pub fn child(&self, under: CancellationToken, mode: Option<&'static Mode>) -> Self {
+        let parent = self.mode();
+        let mode = match (parent.subagent_modes, mode) {
+            (true, Some(mode)) => mode,
+            _ => parent,
+        };
+        Self {
+            cancel: Mutex::new(under.child_token()),
+            under: Some(under),
+            steer: Mutex::default(),
+            follow: Mutex::default(),
+            prompts: Arc::clone(&self.prompts),
+            mode: Arc::new(Mutex::new(mode)),
+            account: Arc::clone(&self.account),
+            reminded: Mutex::new(Some(mode)),
+            cwd: Mutex::new(self.cwd.lock().unwrap().clone()),
+            // A subagent gets its own task, not the top-level orientation.
+            oriented: Mutex::new(true),
+            files: self.files.sharing_locks(),
+        }
+    }
+
+    /// A fresh interrupt for a new run, one that stops with the run above it, if any.
+    pub fn begin_run(&self) -> CancellationToken {
+        let token = match &self.under {
+            Some(under) => under.child_token(),
+            None => CancellationToken::new(),
+        };
+        *self.cancel.lock().unwrap() = token.clone();
+        token
+    }
+
+    pub fn interrupt(&self) {
+        self.cancel.lock().unwrap().cancel();
+    }
+
+    pub fn mode(&self) -> &'static Mode {
+        *self.mode.lock().unwrap()
+    }
+
+    /// Switching into a mode that allows everything also approves permission prompts already
+    /// waiting (questions still wait for their answer).
+    pub fn set_mode(&self, mode: &'static Mode) {
+        *self.mode.lock().unwrap() = mode;
+        if mode.asks_nothing() {
+            self.prompts.approve_permissions();
+        }
+    }
+
+    pub fn account(&self) -> Option<Me> {
+        self.account.lock().unwrap().clone()
+    }
+
+    pub fn set_account(&self, me: Me) {
+        *self.account.lock().unwrap() = Some(me);
+    }
+
+    /// What to tell the model about the mode now: all of it when it changed since the model was
+    /// last told, else the line a mode repeats, if it has one.
+    pub fn take_reminder(&self) -> Option<Reminder> {
+        let mode = self.mode();
+        let mut reminded = self.reminded.lock().unwrap();
+        if reminded.is_some_and(|m| m.id == mode.id) {
+            return mode
+                .reminder_again
+                .is_some()
+                .then_some(Reminder::Still(mode));
+        }
+        let left = reminded.replace(mode);
+        if mode.reminder.is_some() {
+            Some(Reminder::Entered(mode))
+        } else if left.is_some_and(|m| m.reminder.is_some()) {
+            Some(Reminder::Left { now: mode })
+        } else {
+            None
+        }
+    }
+
+    /// What the model was told about the mode was summarised away; the next prompt tells it again.
+    pub fn forget_reminded(&self) {
+        *self.reminded.lock().unwrap() = None;
+    }
+
+    /// The directory bash runs in, when the model `cd`'d somewhere that should stick.
+    pub fn cwd(&self) -> Option<PathBuf> {
+        self.cwd.lock().unwrap().clone()
+    }
+
+    /// Remembers where a bash call left the shell, so the next one starts there.
+    pub fn set_cwd(&self, dir: PathBuf) {
+        *self.cwd.lock().unwrap() = Some(dir);
+    }
+
+    /// True the first time only, so the opening orientation is handed over once per conversation.
+    pub fn orient_once(&self) -> bool {
+        !std::mem::replace(&mut self.oriented.lock().unwrap(), true)
+    }
+
+    /// A new conversation: the model has been told nothing, read nothing, and nothing waits.
+    pub fn start_over(&self) {
+        self.forget_reminded();
+        *self.cwd.lock().unwrap() = None;
+        *self.oriented.lock().unwrap() = false;
+        self.steer.lock().unwrap().clear();
+        self.follow.lock().unwrap().clear();
+        self.files.forget_all();
+    }
+
+    /// Delivered after the current tool calls finish.
+    pub fn steer(&self, parts: Vec<Part>) {
+        self.steer.lock().unwrap().push_back(parts);
+    }
+
+    /// Delivered when the run would otherwise stop.
+    pub fn follow_up(&self, parts: Vec<Part>) {
+        self.follow.lock().unwrap().push_back(parts);
+    }
+
+    pub fn drain_steer(&self) -> Vec<Vec<Part>> {
+        self.steer.lock().unwrap().drain(..).collect()
+    }
+
+    pub fn drain_follow(&self) -> Vec<Vec<Part>> {
+        self.follow.lock().unwrap().drain(..).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mode;
+
+    #[test]
+    fn a_child_mode_does_not_change_the_parents() {
+        let parent = Shared::new(mode::get("hardcode").unwrap());
+        let child = parent.child(CancellationToken::new(), Some(mode::get("build").unwrap()));
+        assert_eq!(child.mode().id, "build");
+        assert_eq!(parent.mode().id, "hardcode");
+    }
+
+    #[test]
+    fn a_child_without_a_mode_follows_the_parent() {
+        let parent = Shared::new(mode::get("plan").unwrap());
+        let child = parent.child(CancellationToken::new(), None);
+        assert_eq!(child.mode().id, "plan");
+    }
+
+    #[test]
+    fn only_an_orchestrator_lets_a_kind_bring_its_own_mode() {
+        let plan = Shared::new(mode::get("plan").unwrap());
+        let coder = plan.child(CancellationToken::new(), Some(mode::get("build").unwrap()));
+        assert_eq!(coder.mode().id, "plan");
+    }
+}

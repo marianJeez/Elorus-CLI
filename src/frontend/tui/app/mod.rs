@@ -1,0 +1,511 @@
+//! The interactive session: one loop over terminal input, agent events, the turn in flight and a
+//! frame tick. The loop owns the transcript and lends it to each turn, which hands it back, so a
+//! turn runs alongside input without an engine thread.
+
+mod account;
+mod conversation;
+mod draw;
+mod effects;
+mod input;
+mod turn;
+
+use std::collections::VecDeque;
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::process::ExitCode;
+use std::time::Instant;
+
+use futures_util::StreamExt;
+use futures_util::future::BoxFuture;
+use futures_util::stream::FuturesUnordered;
+use tokio::sync::mpsc;
+
+use crate::agent::setup::{Continue, Setup};
+use crate::api::models::Model;
+use crate::app::App;
+use crate::commands::Session;
+use crate::config::limits;
+use crate::frontend::tui::card::{self, Card};
+use crate::frontend::tui::command::Work;
+use crate::frontend::tui::editor::Editor;
+use crate::frontend::tui::feed::Feed;
+use crate::frontend::tui::palette::Palette;
+use crate::frontend::tui::paste::Burst;
+use crate::frontend::tui::progress::Progress;
+use crate::frontend::tui::queue::Kind;
+use crate::frontend::tui::screen::Screen;
+use crate::frontend::tui::toast::Toast;
+use crate::frontend::tui::view::View;
+use crate::frontend::tui::{ui, welcome};
+use crate::io::{self, clock, term};
+use crate::live::event::{AgentEvent, Ended};
+use crate::live::prompt::Prompt;
+use crate::live::state::Shared;
+use crate::mcp::Servers;
+use crate::models::Catalog;
+use crate::models::choice::Choice;
+use crate::release::{self, update};
+use crate::session::transcript::Transcript;
+use crate::snapshot::Shadow;
+use crate::text::template;
+use crate::text::theme;
+use crate::text::units;
+use crate::tools::Registry;
+use account::AccountView;
+use conversation::Switch;
+use turn::{Job, NextTurn};
+
+type Turn<'a> = Pin<Box<dyn Future<Output = (Transcript, Ended)> + 'a>>;
+
+/// What every turn shares. The model and system prompt are not here: the session can switch
+/// them between turns.
+struct Turns<'a> {
+    tools: &'a Registry,
+    emit: &'a (dyn Fn(AgentEvent) + Send + Sync),
+}
+
+/// What the loop should do after an input.
+enum Step<'a> {
+    Continue,
+    Send(String),
+    Quit,
+    /// Start network work for the card on screen.
+    Job(BoxFuture<'a, card::Done>),
+    /// Put the conversation away and start another.
+    Session(Switch),
+    /// Take back the last prompt, and send it `again` or put it in the editor.
+    Undo {
+        again: bool,
+    },
+    /// Summarise earlier turns, keeping this in mind.
+    Compact(Option<String>),
+    /// Run beside input: a session command, or what one of them asked for.
+    Work(BoxFuture<'a, Work>),
+    /// Hand the terminal to the user's editor for this file.
+    Edit(PathBuf),
+}
+
+/// The session; going on with the one in `resume` when given, its mode included.
+pub async fn run(
+    app: &App,
+    initial: Option<String>,
+    resume: Option<&Path>,
+) -> anyhow::Result<ExitCode> {
+    let from = resume.map(|path| Continue { path, mode: true });
+    let Setup {
+        catalog,
+        choice,
+        effort,
+        tools,
+        shared,
+        transcript,
+        resumed,
+        gone,
+        shadow,
+        mcp,
+    } = Setup::load(app, from).await?;
+    let session_file = transcript.file().display().to_string();
+    let (tx, rx) = mpsc::unbounded_channel();
+    let emit = move |event: AgentEvent| {
+        let _ = tx.send(event);
+    };
+    let turns = Turns {
+        tools: &tools,
+        emit: &emit,
+    };
+
+    let mut raw = term::Raw::fullscreen()?;
+    let mut tui = Tui::new(
+        app,
+        catalog,
+        (choice, effort),
+        (&shared, &shadow, &mcp),
+        initial,
+        session_file,
+    );
+    if let Some(resumed) = &resumed {
+        tui.resumed(&transcript.messages, resumed, gone.as_deref());
+    }
+    if let Some(change) = update::on_start(&app.http, &app.paths, app.settings.auto_update) {
+        tui.feed.notice(&change.say(), "done");
+    }
+    for (_, note) in mcp.notes() {
+        tui.feed.notice(note, "warn");
+    }
+    let (spent, transcript) = tui.run(&mut raw, turns, transcript, rx).await;
+    drop(raw);
+    // The session is done with its servers; `tui` lends them until here.
+    let earlier = std::mem::take(&mut tui.earlier);
+    let file = tui.session_file.clone();
+    drop(tui);
+    mcp.stop().await;
+
+    let text = &ui::get().text;
+    // Only a file that still holds the whole conversation counts as saved; a turn still
+    // holding the transcript at exit has already written its prompt there.
+    let last = match &transcript {
+        Some(transcript) => transcript.path().map(|p| p.display().to_string()),
+        None => Some(file),
+    };
+    for path in earlier.iter().chain(&last) {
+        term::out(&format!(
+            "{}\n",
+            template::fill(&text.saved, &[("path", path)])
+        ));
+    }
+    if spent > 0 {
+        let cost = units::usd_micros(spent);
+        term::out(&format!(
+            "{}\n",
+            template::fill(&text.spent, &[("cost", &cost)])
+        ));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+struct Tui<'a> {
+    app: &'a App,
+    catalog: Catalog,
+    next: NextTurn,
+    shared: &'a Shared,
+    /// Keeps the files as they were before each prompt changed them, for /undo.
+    shadow: &'a Shadow,
+    mcp: &'a Servers,
+    screen: Screen,
+    feed: Feed,
+    view: View,
+    /// The transcript block on each screen row of the last frame, for clicks.
+    blocks: Vec<Option<usize>>,
+    editor: Editor,
+    palette: Palette,
+    burst: Burst,
+    queue: Vec<(Kind, String)>,
+    /// Prompts waiting on the user, each with its id; the first is on screen in place of the
+    /// editor.
+    cards: VecDeque<(u64, Box<dyn Card>)>,
+    /// The session card (`/login`, `/forums`, `/models`), on screen over any prompt while open.
+    panel: Option<Box<dyn Card>>,
+    /// The turn in flight, for the working line.
+    progress: Option<Progress>,
+    last_verb: Option<usize>,
+    rng: fastrand::Rng,
+    braille: bool,
+    last_ctrl_c: Option<Instant>,
+    toast: Option<Toast>,
+    cost_micros: u64,
+    /// The current conversation's session file, and those of conversations `/new` put away.
+    session_file: String,
+    earlier: Vec<String>,
+    /// Input tokens of the last request; the bar divides by the current model's window, so a
+    /// switch of model shows its own share at once.
+    context_tokens: Option<u64>,
+    /// The model that answered last and the effort it was sent, which a preset may have picked.
+    served: Option<(Model, Option<String>)>,
+    account: AccountView,
+    /// The plan last put in the transcript, so an editor closed without a change adds nothing.
+    plan: Option<String>,
+}
+
+impl<'a> Tui<'a> {
+    fn new(
+        app: &'a App,
+        catalog: Catalog,
+        (choice, effort): (Choice, Option<String>),
+        (shared, shadow, mcp): (&'a Shared, &'a Shadow, &'a Servers),
+        initial: Option<String>,
+        session_file: String,
+    ) -> Self {
+        let limits = &limits::get().tui;
+        let (width, height) = term::size();
+        let mut editor = Editor::with_history(limits.history_max.value);
+        if let Some(text) = initial {
+            editor.set_text(&text);
+        }
+        let mut tui = Self {
+            app,
+            catalog,
+            next: NextTurn::new(&app.paths, choice, effort, mcp.connected()),
+            shared,
+            shadow,
+            mcp,
+            screen: Screen::new(width, height, theme::get(), term::color_depth()),
+            feed: Feed::new(),
+            view: View::default(),
+            blocks: Vec::new(),
+            editor,
+            palette: Palette::default(),
+            burst: Burst::new(limits.paste_gap_ms.ms(), limits.paste_min_keys.value),
+            queue: Vec::new(),
+            cards: VecDeque::new(),
+            panel: None,
+            progress: None,
+            last_verb: None,
+            rng: fastrand::Rng::new(),
+            braille: term::braille(),
+            last_ctrl_c: None,
+            toast: None,
+            cost_micros: 0,
+            session_file,
+            earlier: Vec::new(),
+            context_tokens: None,
+            served: None,
+            account: AccountView::new(),
+            plan: None,
+        };
+        tui.feed.set_welcome(tui.welcome());
+        tui
+    }
+
+    /// Share of the current model's window the last request used.
+    fn context_pct(&self) -> Option<u64> {
+        self.context_tokens
+            .map(|tokens| tokens * 100 / self.shown_model().context_window.max(1))
+    }
+
+    /// The model the session speaks of: with a preset, the one that answered last.
+    fn shown_model(&self) -> &Model {
+        match (&self.next.choice, &self.served) {
+            (Choice::Preset(_), Some((model, _))) => model,
+            _ => self.next.choice.model(),
+        }
+    }
+
+    /// What the bar and the commands call the session's model: a preset's name, with the model
+    /// that answered last once one has.
+    fn model_label(&self) -> String {
+        match (&self.next.choice, &self.served) {
+            (Choice::Preset(routes), Some((model, _))) => template::fill(
+                &ui::get().footer.preset,
+                &[("preset", &routes.id), ("model", &model.id)],
+            ),
+            (choice, _) => choice.id().to_owned(),
+        }
+    }
+
+    /// The effort shown beside the model: with a preset, what the last request was sent.
+    fn shown_effort(&self) -> Option<&str> {
+        match (&self.next.choice, &self.served) {
+            (Choice::Preset(_), served) => served.as_ref().and_then(|(_, e)| e.as_deref()),
+            (Choice::Model(_), _) => self.next.effort(),
+        }
+    }
+
+    /// What this session reports about itself to a command.
+    fn session(&self) -> Session {
+        Session {
+            model: self.model_label(),
+            preset: self.next.choice.preset().map(|p| p.path.clone()),
+            effort: self.shown_effort().map(str::to_owned),
+            mode: self.shared.mode().label.clone(),
+            context_pct: self.context_pct(),
+            cost_micros: self.cost_micros,
+            file: self.session_file.clone(),
+            snapshots_off: self.shadow.off(),
+            mcp: self.mcp.report(),
+        }
+    }
+
+    fn welcome(&self) -> welcome::Info {
+        let mode = self.shared.mode();
+        welcome::Info {
+            version: release::shown(),
+            cwd: self.app.paths.project.display().to_string(),
+            model: self.model_label(),
+            effort: self.shown_effort().map(str::to_owned),
+            mode_label: mode.label.clone(),
+            mode_color: mode.color.clone(),
+            warning: self.account_warning(),
+            braille: self.braille,
+        }
+    }
+
+    /// Runs until the user quits; returns what the session spent, in micro-dollars, and the
+    /// transcript unless a turn still held it.
+    async fn run(
+        &mut self,
+        raw: &mut term::Raw,
+        turns: Turns<'a>,
+        transcript: Transcript,
+        mut events: mpsc::UnboundedReceiver<AgentEvent>,
+    ) -> (u64, Option<Transcript>) {
+        let mut transcript = Some(transcript);
+        let mut turn: Option<Turn<'a>> = None;
+        let mut job: Option<BoxFuture<'a, card::Done>> = None;
+        let mut work: FuturesUnordered<BoxFuture<'a, Work>> = FuturesUnordered::new();
+        let mut inputs = Box::pin(term::inputs());
+        let mut tick = clock::ticks(limits::get().tui.frame_ms.ms());
+        let _shared = self.shared;
+        loop {
+            if let Some(run) = self.account_work() {
+                work.push(run);
+            }
+            self.draw(turn.is_some());
+            let step = tokio::select! {
+                input = inputs.next() => {
+                    let Some(input) = input else { break };
+                    self.input(input, turn.is_some(), job.is_some())
+                }
+                Some(event) = events.recv() => {
+                    self.agent(event);
+                    while let Ok(event) = events.try_recv() {
+                        self.agent(event);
+                    }
+                    Step::Continue
+                }
+                (owned, _) = async { turn.as_mut().expect("guarded by the branch condition").await }, if turn.is_some() => {
+                    turn = None;
+                    transcript = Some(owned);
+                    self.progress = None;
+                    self.queue.clear();
+                    while let Ok(event) = events.try_recv() {
+                        self.agent(event);
+                    }
+                    Step::Continue
+                }
+                done = async { job.as_mut().expect("guarded by the branch condition").await }, if job.is_some() => {
+                    job = None;
+                    self.job_done(done)
+                }
+                Some(done) = work.next(), if !work.is_empty() => self.finish(done),
+                // Frames tick while something moves: a turn, or a toast that has to go away.
+                _ = tick.tick(), if turn.is_some() || self.toast.is_some() => Step::Continue,
+            };
+            match step {
+                Step::Continue => {}
+                Step::Quit => break,
+                Step::Job(run) => job = Some(run),
+                Step::Work(run) => work.push(run),
+                // crossterm reads stdin while its stream lives, so the stream goes before the
+                // editor has the terminal and a new one comes after, or keys go astray.
+                Step::Edit(file) => {
+                    drop(inputs);
+                    let edited = raw.lend(io::proc::edit(&file)).await.and_then(|e| e);
+                    inputs = Box::pin(term::inputs());
+                    self.screen.forget();
+                    self.plan_edited(&file, edited);
+                }
+                // Typed text queues while a turn runs; only a command's message gets here.
+                Step::Send(text) => match transcript.take() {
+                    Some(owned) => turn = Some(self.start(Job::Prompt(text), owned, &turns)),
+                    None => self.feed.notice(&ui::get().text.busy, "warn"),
+                },
+                Step::Compact(focus) => match transcript.take() {
+                    Some(owned) => turn = Some(self.start(Job::Compact(focus), owned, &turns)),
+                    None => self.feed.notice(&ui::get().text.busy, "warn"),
+                },
+                // CEILING: the restore runs in the loop, so a huge one holds the screen up to
+                // `snapshot.timeout_secs`. Upgrade: run it as `Work` and hold sends meanwhile.
+                Step::Undo { again } => match transcript.take() {
+                    Some(mut owned) => match self.take_back(&mut owned, again).await {
+                        Some(prompt) => turn = Some(self.start(Job::Prompt(prompt), owned, &turns)),
+                        None => transcript = Some(owned),
+                    },
+                    None => self.feed.notice(&ui::get().text.busy, "warn"),
+                },
+                // A turn holds the transcript while it runs.
+                Step::Session(to) => match transcript.take() {
+                    Some(old) => transcript = Some(self.switch_to(old, to)),
+                    None => self.feed.notice(&ui::get().text.busy, "warn"),
+                },
+            }
+            // Closing a card drops whatever it was waiting on.
+            if self.panel.is_none() {
+                job = None;
+            }
+        }
+        (self.cost_micros, transcript)
+    }
+
+    /// The plan as the user left it in their editor goes in the transcript above its card;
+    /// `plan_exit` tells the model when the answer comes.
+    fn plan_edited(&mut self, file: &Path, edited: std::io::Result<()>) {
+        let text = &ui::get().card;
+        let plan = edited
+            .and_then(|()| io::fs::read_string(file))
+            .map(Option::unwrap_or_default);
+        match plan {
+            Ok(plan) if self.plan.as_ref() == Some(&plan) => {}
+            Ok(plan) => {
+                self.feed.notice(&text.plan_edited, "done");
+                self.feed.markdown(&plan);
+                self.plan = Some(plan);
+            }
+            Err(e) => {
+                let why = template::fill(&text.plan_unedited, &[("error", &e.to_string())]);
+                self.feed.notice(&why, "error");
+            }
+        }
+    }
+
+    fn agent(&mut self, event: AgentEvent) {
+        let now = clock::instant();
+        match &event {
+            AgentEvent::MessageEnd { message } => {
+                if let Some(usage) = message.usage {
+                    self.cost_micros += usage.cost_micros;
+                    self.context_tokens = Some(usage.input);
+                }
+                self.served = (self.catalog.get(&message.model).cloned())
+                    .map(|model| (model, message.effort.clone()));
+                if let Some(error) = &message.error {
+                    self.account_follow(error);
+                }
+                self.account_reply_ended();
+            }
+            AgentEvent::RunEnd(_) => self.account_run_ended(),
+            AgentEvent::CompactionEnd { usage, error, .. } => {
+                if let Some(usage) = usage {
+                    self.cost_micros += usage.cost_micros;
+                }
+                // The next request's size is unknown until it is sent.
+                if error.is_none() {
+                    self.context_tokens = None;
+                }
+            }
+            AgentEvent::SnapshotOff { why } => {
+                let text = template::fill(&ui::get().undo.off, &[("why", why)]);
+                self.feed.notice(&text, "warn");
+            }
+            AgentEvent::Delivered { text } => {
+                if let Some(i) = self.queue.iter().position(|(_, t)| t == text) {
+                    self.queue.remove(i);
+                }
+            }
+            // A subagent asks through this session's prompts, what it spends is this session's,
+            // and so are the servers it calls; the window it fills is its own.
+            AgentEvent::Prompt { .. } | AgentEvent::Child { .. } | AgentEvent::Mcp { .. } => {
+                match event.innermost() {
+                    AgentEvent::Prompt { id, prompt, .. } => {
+                        // The whole plan goes in the transcript, which scrolls; a card would cut it.
+                        if let Prompt::PlanExit { plan, .. } = prompt {
+                            self.feed.markdown(plan);
+                            self.plan = Some(plan.clone());
+                        }
+                        let card = card::from_prompt(prompt, self.draw_width());
+                        self.cards.push_back((*id, card));
+                    }
+                    AgentEvent::MessageEnd { message } => {
+                        self.cost_micros += message.usage.map_or(0, |u| u.cost_micros);
+                    }
+                    AgentEvent::CompactionEnd {
+                        usage: Some(usage), ..
+                    } => self.cost_micros += usage.cost_micros,
+                    AgentEvent::Mcp { note, .. } => self.feed.notice(note, "warn"),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        if let Some(progress) = &mut self.progress {
+            progress.event(&event, now);
+        }
+        // The model can change between requests; the feed reads its window when a reply ends.
+        if let AgentEvent::MessageEnd { message } = event.innermost() {
+            let window = self.catalog.get(&message.model).map(|m| m.context_window);
+            self.feed
+                .set_window(window.unwrap_or(self.next.choice.model().context_window));
+        }
+        self.feed.event(&event, now);
+    }
+}

@@ -1,0 +1,268 @@
+# Words and shapes of the interactive UI. Colours are in theme.toml, keys in keybinds.toml.
+
+spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+prompt = "› "
+# Runs down the left edge of the user's messages, blank band rows included.
+user_mark = "▌ "
+# Starts each stretch of the model's prose; what follows it hangs under the text.
+reply_mark = "◆ "
+placeholder = "Ask elorus anything  ·  / for commands"
+tips = [
+  "/help lists commands",
+  "Shift+Tab cycles {modes}",
+  "Enter sends · while working, Enter queues and Tab steers",
+  "Shift+Enter or Ctrl+J starts a new line",
+  "Right-click copies a message",
+]
+
+# Marks drawn across the session; each is one cell wide.
+[marks]
+# A finished or failed tool call, and an error card.
+done = "●"
+# The selected row of a card's list.
+selected = "›"
+# A card's own-words field.
+field = "✎"
+# A question already answered, on its tab.
+answered = "✓"
+ticked = "[x]"
+unticked = "[ ]"
+# A message waiting under the bar.
+queued = "↳"
+# Each hidden character of a secret.
+mask = "•"
+# The rules round the bar and the edges of a card's box.
+rule = "─"
+side = "│"
+top_left = "╭"
+top_right = "╮"
+bottom_left = "╰"
+bottom_right = "╯"
+
+[footer]
+# Items on the rule under the bar, right-aligned, in this order (effort follows the model).
+items = ["mode", "model", "context", "cost", "allowance", "balance"]
+separator = " · "
+context = "ctx {pct}%"
+cost = "{cost} est"
+allowance = "{plan} {pct}%"
+balance = "{balance} left"
+# The model item on a preset, once a request has gone: the preset, then the model it picked.
+preset = "{preset} → {model}"
+
+# The welcome card's lines: the version after the name, then model, effort and mode.
+[welcome]
+version = " v{version}"
+separator = " · "
+# Joins the modes in the Shift+Tab tip.
+modes = " → "
+
+[text]
+queued = "queued"
+steering = "steering"
+request = "request {id}"
+not_logged_in = "Not logged in: type /login, or /signup for a new account"
+key_rejected = "elorus did not accept this key: type /login"
+resumed = "Going on with {path}; it spent about {cost} before."
+declined = "Stopped: you declined a call."
+ctrl_c_again = "Press Ctrl+C again to quit"
+unknown_command = "Unknown command {command}. {help} lists them."
+more_lines = { one = "… {n} more line", many = "… {n} more lines" }
+more_below = "↓ {n} more · PgDn"
+saved = "Session saved to {path}"
+spent = "Spent about {cost} this session."
+copied = "✓ Copied"
+nothing_to_copy = "Nothing to copy yet: elorus has not replied."
+busy = "Finish or interrupt the reply first (Esc)."
+effort_set = "Effort: {effort} for this session."
+effort_unsent = " {model} does not reason, so it sends none."
+new_conversation = "A new conversation."
+new_saved = "A new conversation. The last one is saved in {path}."
+
+# The working line: a flock, a verb with a glint, time and tokens.
+[status]
+# One frame per `tui.status_frame_ms`; all frames one width, so the verb stays put.
+frames = ["⠑⢄⡠⠊⠑", "⠢⣀⠔⠉⠢", "⢄⡠⠊⠑⢄", "⣀⠔⠉⠢⣀", "⡠⠊⠑⢄⡠", "⠔⠉⠢⣀⠔", "⠊⠑⢄⡠⠊", "⠉⠢⣀⠔⠉"]
+# For terminals without braille (legacy Windows conhost).
+plain = ["'._-'", "-_.'-", "._-'.", "_.'-_", "_-'._", ".'-_.", "-'._-", "'-_.'"]
+# One per turn, never the same twice running.
+verbs = ["Gooning", "Tweaking", "Cooking", "Pasting", "Maffing", "Napping", "Trapping", "Waxing", "Bypassing", "Waning"]
+tokens = "↓ {n} tok"
+working = "  {secs}s · {tokens} · esc to interrupt"
+# {retrying} is the shared word (data/frontend.toml).
+retry = "{retrying} {secs}s · esc to interrupt"
+
+# Thinking blocks: a click opens or closes one, Ctrl+T all of them.
+[thinking]
+closed = "▸"
+open = "▾"
+done = "Thought for {secs}s"
+# Read back from a session file, which keeps no duration.
+untimed = "Thought"
+live = "Thinking… {secs}s"
+gutter = "│ "
+
+# `/models` inside a session.
+[picker]
+title = "Models"
+presets_title = "Presets"
+hint = "↑↓ move · type to search · → or enter select · esc close"
+filter = "search: "
+cursor = "▏"
+no_match = "No model or preset matches “{query}”."
+switched = "Model: {model} for this session."
+preset_written = "Wrote {path}: edit it, then pick it in /models."
+
+# `/resume` inside a session: this project's earlier sessions.
+[resume]
+title = "Sessions"
+hint = "↑↓ move · → or enter go on with it · esc close"
+none = "No earlier session in this project to go on with."
+saved = "The last conversation is saved in {path}."
+
+# A `task` card while its subagent works: `{call}` is the subagent's latest call.
+[task]
+step = "  └ {call}"
+
+# `/undo` inside a session.
+[undo]
+done = "Took back the last prompt and what followed it; it is in the editor to change or send again."
+restored = { one = "{n} file it changed is back as it was.", many = "{n} files it changed are back as they were." }
+not_restored = "Files it changed were not restored: {why}."
+failed = "Could not restore {what}"
+kept = "Left as they are, since they changed after that reply: {paths}"
+off = "/undo will not restore files from here on: {why}."
+nothing = "Nothing to take back yet."
+
+# The popup listing commands while a `/name` is typed.
+[palette]
+title = "commands"
+
+# `/login` inside a session; {placeholders} are filled in.
+[login]
+title = "Log in to elorus"
+pair = "Pair this device (approve in your browser)"
+number = "Enter my account number"
+starting = "Asking elorus for a pairing code…"
+open = "Open {url}"
+code = "and enter the code  "
+copy_code = "  (right-click copies it)"
+waiting = "Waiting for approval…"
+checking = "Checking with elorus…"
+failed = "Login failed: {error}"
+hint = "esc cancel"
+
+# Asked before a login or signup replaces the key stored on this machine; {hint} is its last
+# digits, {error} why the file cannot be read.
+[replace]
+title = "Replace the stored key?"
+account = "This machine keeps account number {hint}. An account number has no recovery: unless it is written down elsewhere, replacing it here loses the account."
+device = "This machine keeps device key {hint}. Replacing it is safe: the device can be paired again."
+unreadable = "{error}. Replacing it overwrites whatever it holds."
+replace = "Replace it"
+keep = "Keep it"
+
+# `/signup` in a session; the rest of its words are signup's own (data/commands/signup.toml).
+[signup]
+title = "Create a elorus account"
+number = "Your account number:  "
+done = "Account {hint} created and saved in {path}. "
+closed = "Account {hint} is saved in {path}."
+failed = "Signup failed: {error}"
+retry = "Try again"
+close = "Close"
+hint = "esc close"
+
+# `/account` in a session: where the account stands, and its keys. {name} is a key's device (or
+# "account" for the account number), {hint} its last digits, {date} the day it was made.
+[account]
+title = "Account"
+loading = "Asking elorus…"
+revoking = "Revoking the key…"
+keys = "Keys ({n})"
+close = "Close"
+back = "Back"
+key = "{name}  {hint}  since {date}"
+current = "  · this session"
+current_kept = "That is the key this session uses; revoke it from another device, or /logout here."
+confirm = "Revoke {name} {hint}?"
+device_warning = "Whatever uses this key stops working at once; that device can be paired again."
+account_warning = "This is the account number itself. Once revoked it signs in nowhere, and only the remaining device keys reach the account."
+revoke = "Revoke it"
+keep = "Keep it"
+revoked = "Revoked {name} {hint}."
+failed = "Account: {error}"
+hint = "esc back"
+# The last account.usage_days of spend, then the models that spent most.
+usage = "Last {days} days: {spent} over {requests}"
+usage_model = "  {label}: {spent} over {requests}"
+requests = { one = "{n} request", many = "{n} requests" }
+saving = "Telling elorus…"
+# The option that flips balance fallback, and what it says once it has.
+fallback = "Balance fallback is {state}: turn it {other}"
+fallback_set = "Balance fallback is now {state}."
+on = "on"
+off = "off"
+
+# `/forums` in a session: the forums the agent can browse, to log in to, log out of, remove or add.
+[forums]
+title = "Forums"
+add = "+ Add a forum"
+hint = "↑↓ move · → or enter open · esc close"
+menu_hint = "↑↓ move · enter choose · 1-9 pick · esc back"
+log_in = "Log in"
+log_in_again = "Log in as someone else"
+log_out = "Log out"
+remove = "Remove"
+add_title = "Add a forum"
+add_note = "Searches Tapatalk's directory; only Tapatalk forums can be added."
+search = "Search by name or URL…"
+found_title = "Forums matching “{query}”"
+found_hint = "↑↓ move · → or enter add · esc back"
+no_match = "No Tapatalk forum matched “{query}”."
+login_title = "Log in to {name}"
+login_note = "elorus keeps only the session cookie the forum hands back, never the password."
+username = "Username: "
+password = "Password: "
+input_hint = "enter next · esc back"
+searching = "Searching Tapatalk's directory for “{query}”…"
+adding = "Adding {name}…"
+logging_in = "Logging in to {name} as {user}…"
+saving = "Saving…"
+cancel_hint = "esc cancel"
+failed = "Forums: {error}"
+
+# The card that replaces the editor when elorus needs an answer.
+[card]
+hint = "↑↓ move · enter choose · 1-9 pick · esc no"
+input_hint = "enter send · esc back"
+other = "Other…"
+plan_title = "Plan ready"
+plan_body = "The plan is above (PageUp scrolls). Its file: `{file}`"
+plan_edit = "Edit it in your editor"
+plan_other = "Tell elorus what to change…"
+plan_edited = "The plan as you left it:"
+plan_unedited = "No editor opened the plan ({error}). Set $VISUAL or $EDITOR to one."
+# The model's questions: one tab each, then a review before the answers go back.
+questions_title = "elorus asks"
+question_tab = "Question {n}"
+review_tab = "Send"
+review_title = "Your answers"
+own_words = "“{text}”"
+unanswered = "not answered yet"
+question_hint = "↑↓ move · enter choose · 1-9 pick · ←→ questions · esc dismiss"
+multiple_hint = "↑↓ move · space or 1-9 tick · enter done · ←→ questions · esc dismiss"
+review_hint = "enter send · ← or 1-9 change an answer · esc dismiss"
+
+# Permission answers: `reply` is yes, no, or no_why (asks for the reason).
+[[card.permission]]
+label = "Yes"
+reply = "yes"
+
+[[card.permission]]
+label = "No"
+reply = "no"
+
+[[card.permission]]
+label = "No, and tell elorus why…"
+reply = "no_why"

@@ -1,0 +1,20 @@
+description = "The full output a bash cut points to, under elorus's tmp dir, is readable in a headless run"
+args = ["--mode", "manual", "-p", "read the full output"]
+
+[home_files]
+"tmp/bash-1.txt" = "line 99999\n"
+
+[[reply]]
+calls = [{ name = "read", arguments = '{"path": "{home}/tmp/bash-1.txt"}' }]
+
+[[reply]]
+text = 'It ends at line 99999.'
+
+[expect]
+exit = 0
+
+[[expect.requests]]
+index = 1
+message = -1
+role = "tool"
+contains = "line 99999"

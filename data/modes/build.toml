@@ -1,0 +1,14 @@
+id = "build"
+label = "BUILD"
+color = "mode_build"
+order = 4
+# A coder subagent's mode, named by data/agents/coder.toml; not a mode the user cycles into.
+hidden = true
+summary = "Does the work a hardcode orchestrator hands over: edits files, runs commands and checks the result"
+
+# Nothing asks; the user's deny rules still hold.
+doom_loop = "tell_model"
+
+[verdicts]
+ask = "allow"
+deny = "deny"

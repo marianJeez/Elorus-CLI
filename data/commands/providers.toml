@@ -1,0 +1,18 @@
+name = "providers"
+summary = "List, add and key third-party model providers"
+usage = "providers [list | add <id> --base <url> [--wire openai|anthropic] [--label <name>] [--key-env <var>] | set-key <id> [key] | remove-key <id>]"
+
+[text]
+added = "Added `{id}` to {path}. Put its key in place with `elorus providers set-key {id}`."
+exists = "`{id}` is already a provider; edit {path} to change it."
+key_prompt = "Key for {id}: "
+key_set = "Key for {id} saved ({hint})."
+key_env_shadow = " {env} is set in this shell and is used instead."
+key_removed = "Key for {id} removed."
+key_missing = "No stored key for {id}."
+no_terminal = "No terminal to ask for the key: pass it, `elorus providers set-key {id} <key>`."
+unknown = "No provider `{id}`; `elorus providers` lists them."
+bad_wire = "Unknown wire `{wire}`: use openai or anthropic."
+bad_base = "The base URL must start with http:// or https://."
+session = "`/providers` only lists them; key and add them from a shell: `elorus providers set-key <id>`."
+note = "Keys come from each provider's variable first, then from {path}. A provider with no key is not offered."

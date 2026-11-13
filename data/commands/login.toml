@@ -1,0 +1,20 @@
+name = "login"
+summary = "Log in: pair this machine, or use an account number"
+usage = "login [--key <account number> | --status]"
+secret = ["--key"]
+
+# What login says; {placeholders} are filled in. The session shows the same results.
+[text]
+pair = """
+Pair this machine with your elorus account:
+  1. Open {url}
+  2. Sign in and enter the code  {code}
+
+Waiting for approval (Ctrl+C to cancel)…"""
+logged_in = "Logged in with {what} {hint}. {standing}"
+status = "Logged in with {what} {hint}."
+from_env = "Using ELORUS_API_KEY from the environment."
+env_note = " ELORUS_API_KEY is set in this environment and overrides any stored key."
+logged_out = "Not logged in. Run `{login}`."
+account = "account number"
+device = "device key"

@@ -1,0 +1,89 @@
+//! Device pairing: the machine asks for a code, a signed-in person approves it on the web,
+//! and the machine collects its own revocable key.
+
+use std::time::Duration;
+
+use serde::Deserialize;
+
+use crate::api::error::{self, ApiError};
+use crate::api::{Api, Call};
+use crate::api::{endpoints, retry};
+use crate::config::limits;
+use crate::conversation::error::ErrorInfo;
+use crate::io;
+
+/// No `Debug`: it holds the device code.
+#[derive(Deserialize)]
+pub struct Started {
+    pub device_code: String,
+    pub user_code: String,
+    /// Seconds the code stays valid.
+    pub ttl: u64,
+}
+
+pub enum Poll {
+    Pending,
+    Ready(String),
+}
+
+#[derive(Deserialize)]
+struct Ready {
+    api_key: String,
+}
+
+/// Asks for a code under this machine's name, which the key list shows once it is approved.
+pub async fn start(api: &Api) -> Result<Started, ApiError> {
+    let body = serde_json::json!({ "hostname": io::proc::hostname() });
+    api.call_json(
+        "pair_start",
+        Call {
+            body: Some(&body),
+            ..Call::default()
+        },
+    )
+    .await
+}
+
+pub async fn poll(api: &Api, device_code: &str) -> Result<Poll, ApiError> {
+    let resp = api
+        .call(
+            "pair_poll",
+            Call {
+                args: &[("code", device_code)],
+                ..Call::default()
+            },
+        )
+        .await?;
+    if resp.head.status == 202 {
+        return Ok(Poll::Pending);
+    }
+    let ready: Ready = error::json(&resp.body)?;
+    Ok(Poll::Ready(ready.api_key))
+}
+
+/// Polls until approved or expired, backing off on any error worth retrying.
+pub async fn wait(api: &Api, started: &Started) -> Result<String, ApiError> {
+    let limits = &limits::get().pair;
+    let collect = async {
+        loop {
+            match poll(api, &started.device_code).await {
+                Ok(Poll::Ready(key)) => return Ok(key),
+                Ok(Poll::Pending) => io::clock::sleep(limits.poll_interval_ms.ms()).await,
+                Err(e) if retry::retryable(&e.info) => {
+                    io::clock::sleep(limits.backoff_ms.ms()).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    };
+    io::clock::timeout(Duration::from_secs(started.ttl), collect)
+        .await
+        .unwrap_or_else(
+            |_| Err(ErrorInfo::local("pair_expired", "the pairing code expired").into()),
+        )
+}
+
+/// Where a signed-in person approves the code.
+pub fn page() -> String {
+    endpoints::url(endpoints::get("pair_page"), &[])
+}

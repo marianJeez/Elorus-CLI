@@ -1,0 +1,89 @@
+# Where elorus lives. `env` names the variable that overrides an origin (tests point it at a fake).
+[origins.api]
+url = "https://api.elorus.sh"
+env = "ELORUS_API_URL"
+
+[origins.chat]
+url = "https://chat.elorus.sh"
+env = "ELORUS_CHAT_URL"
+
+# Where elorus's own releases are listed, for the updater.
+[origins.releases]
+url = "https://api.github.com"
+env = "ELORUS_RELEASES_URL"
+
+[endpoints.models]
+origin = "api"
+method = "GET"
+path = "/v1/models"
+
+[endpoints.chat]
+origin = "api"
+method = "POST"
+path = "/v1/chat/completions"
+auth = true
+
+[endpoints.me]
+origin = "api"
+method = "GET"
+path = "/api/me"
+auth = true
+
+# The account's keys, and revoking one; elorus refuses to revoke the key that asks.
+[endpoints.me_keys]
+origin = "api"
+method = "GET"
+path = "/api/me/keys"
+auth = true
+
+[endpoints.me_key_revoke]
+origin = "api"
+method = "POST"
+path = "/api/me/keys/{ref}/revoke"
+auth = true
+
+# Spend by model over the last {days}, and whether the balance pays once a plan's allowance is
+# spent.
+[endpoints.me_usage]
+origin = "api"
+method = "GET"
+path = "/api/me/usage?days={days}"
+auth = true
+
+[endpoints.me_fallback]
+origin = "api"
+method = "POST"
+path = "/api/me/balance-fallback"
+auth = true
+
+[endpoints.pair_start]
+origin = "api"
+method = "POST"
+path = "/api/pair/start"
+
+[endpoints.pair_poll]
+origin = "api"
+method = "GET"
+path = "/api/pair/{code}"
+
+# A web page, not an API: where a person approves a pairing code.
+[endpoints.pair_page]
+origin = "chat"
+method = "GET"
+path = "/pair"
+
+[endpoints.pow]
+origin = "chat"
+method = "GET"
+path = "/api/pow?kind={kind}"
+
+[endpoints.signup]
+origin = "chat"
+method = "POST"
+path = "/api/signup"
+
+# The newest release: its tag and its files.
+[endpoints.latest_release]
+origin = "releases"
+method = "GET"
+path = "/repos/marianJeez/Elorus-CLI/releases/latest"

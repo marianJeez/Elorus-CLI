@@ -1,0 +1,141 @@
+//! Hands PLAN mode's finished plan to the user. Always registered, so the tool list (and the
+//! vendor's cache of it) does not change with the mode; outside PLAN it refuses.
+
+use std::sync::LazyLock;
+
+use futures_util::future::BoxFuture;
+use serde::Deserialize;
+use serde::de::IgnoredAny;
+
+use super::{Check, Output, Refusal, Spec, Tool, ToolCx, target};
+use crate::data;
+use crate::io;
+use crate::live::prompt::{Prompt, Reply};
+use crate::mode;
+use crate::permission::catalog;
+use crate::permission::gate::Ask;
+use crate::text::template::fill;
+
+/// The name the run loop matches to tell whether a PLAN run handed its plan over.
+pub const NAME: &str = "plan_exit";
+
+static SPEC: LazyLock<Spec> = super::spec!("plan_exit");
+
+static TEXT: LazyLock<Text> = data::load!("tools/plan_exit.toml");
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Text {
+    only: String,
+    missing: String,
+    approved: String,
+    keep: String,
+    changes: String,
+    edited: String,
+    unavailable: String,
+    unknown_mode: String,
+    choice: Vec<Choice>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Choice {
+    label: String,
+    /// The mode to implement in; none means keep planning.
+    #[serde(default)]
+    mode: Option<String>,
+}
+
+pub struct PlanExit;
+
+impl Tool for PlanExit {
+    type Args = IgnoredAny;
+
+    fn spec(&self) -> &Spec {
+        &SPEC
+    }
+
+    fn check(&self, _args: &Self::Args, cx: &ToolCx<'_>) -> Result<Check, Refusal> {
+        if !cx.shared.mode().plan_exit {
+            return Err(TEXT.only.clone().into());
+        }
+        Ok(Check::new(vec![Ask::new(catalog::PLAN_EXIT.name, "*")]))
+    }
+
+    fn run<'a>(
+        &'a self,
+        _args: Self::Args,
+        cx: &'a ToolCx<'a>,
+    ) -> BoxFuture<'a, Result<Output, String>> {
+        Box::pin(async move {
+            // Read where the write tool wrote it: the spelling is project-relative when the
+            // plan lives inside the project.
+            let file = target::resolve(&cx.app.paths, cx.plan_file).map(|t| t.path);
+            let read = || {
+                file.as_ref()
+                    .ok()
+                    .and_then(|f| io::fs::read_string(f).ok().flatten())
+                    .filter(|p| !p.trim().is_empty())
+            };
+            let (Some(plan), Ok(path)) = (read(), &file) else {
+                return Err(fill(&TEXT.missing, &[("plan_file", cx.plan_file)]));
+            };
+            let prompt = Prompt::PlanExit {
+                plan: plan.clone(),
+                file: path.to_string_lossy().into_owned(),
+                choices: TEXT.choice.iter().map(|c| c.label.clone()).collect(),
+            };
+            let Some(reply) = cx.ask(prompt).await else {
+                return Ok(Output::cancelled());
+            };
+            let said = match reply {
+                Reply::Choice(i) => match TEXT.choice.get(i).and_then(|c| c.mode.as_deref()) {
+                    Some(id) => {
+                        let Some(next) = mode::get(id) else {
+                            return Err(fill(&TEXT.unknown_mode, &[("mode", id)]));
+                        };
+                        cx.shared.set_mode(next);
+                        fill(&TEXT.approved, &[("mode", &next.label)])
+                    }
+                    None => TEXT.keep.clone(),
+                },
+                Reply::Text(feedback)
+                | Reply::No {
+                    feedback: Some(feedback),
+                } => fill(&TEXT.changes, &[("feedback", &feedback)]),
+                Reply::Unavailable => TEXT.unavailable.clone(),
+                _ => TEXT.keep.clone(),
+            };
+            // The user may have changed the file while the card was up, from it or elsewhere.
+            Ok(Output::ok(match read().filter(|now| *now != plan) {
+                Some(now) => fill(&TEXT.edited, &[("plan", &now), ("said", &said)]),
+                None => said,
+            }))
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::testing::Project;
+    use serde_json::json;
+
+    #[test]
+    fn choices_name_real_modes() {
+        assert!(!TEXT.choice.is_empty());
+        for choice in TEXT.choice.iter() {
+            if let Some(id) = &choice.mode {
+                assert!(mode::get(id).is_some(), "unknown mode {id}");
+            }
+        }
+    }
+
+    #[test]
+    fn refuses_outside_plan_mode() {
+        let project = Project::new();
+        assert!(project.check(&PlanExit, &json!({})).is_err());
+        project.shared.set_mode(mode::get("plan").unwrap());
+        assert!(project.check(&PlanExit, &json!({})).is_ok());
+    }
+}

@@ -1,0 +1,18 @@
+description = "A deny rule in the project's .elorus/config.toml reaches the permission gate"
+args = ["--mode", "manual", "-p", "read the notes"]
+project = "denies_read"
+
+[[reply]]
+calls = [{ name = "read", arguments = '{"path": "notes.txt"}' }]
+
+[[reply]]
+text = 'The plan is ready.'
+
+[expect]
+exit = 0
+
+[[expect.requests]]
+index = 1
+message = -1
+role = "tool"
+contains = "Not allowed"

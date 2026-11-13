@@ -1,0 +1,189 @@
+# Third-party model providers elorus can talk to besides its own gateway.
+#
+# A provider is one connection: where it lives, which wire it speaks and where its key comes
+# from. `wire` is `openai` (chat completions, `/models`) or `anthropic` (messages, `/models`).
+# `key_env` names the variable a key is read from first; `elorus providers set-key` stores one
+# sealed under ~/.elorus when there is no variable. A provider with no `key_env` needs no key
+# unless one is stored (a local server, say).
+#
+# `models` are the ones known offline, with the limits and prices the table shows. Whatever
+# `GET {base_url}/models` adds is listed too, with unknown prices and limits left blank.
+# Users add or override providers in ~/.elorus/providers.toml, same shape, by id.
+
+[[provider]]
+id = "openai"
+label = "OpenAI"
+wire = "openai"
+base_url = "https://api.openai.com/v1"
+key_env = "OPENAI_API_KEY"
+
+[[provider.model]]
+id = "gpt-4o-mini"
+name = "GPT-4o mini"
+context = 128000
+max_output = 16384
+input = 0.15
+cached = 0.075
+output = 0.6
+tools = true
+temperature = true
+caching = true
+
+[[provider.model]]
+id = "gpt-4o"
+name = "GPT-4o"
+context = 128000
+max_output = 16384
+input = 2.5
+cached = 1.25
+output = 10.0
+tools = true
+temperature = true
+caching = true
+
+[[provider]]
+id = "anthropic"
+label = "Anthropic"
+wire = "anthropic"
+base_url = "https://api.anthropic.com/v1"
+key_env = "ANTHROPIC_API_KEY"
+
+[[provider.model]]
+id = "claude-sonnet-4-5"
+name = "Claude Sonnet 4.5"
+context = 200000
+max_output = 64000
+input = 3.0
+cached = 0.3
+output = 15.0
+reasoning = true
+tools = true
+temperature = true
+caching = true
+
+[[provider.model]]
+id = "claude-haiku-4-5"
+name = "Claude Haiku 4.5"
+context = 200000
+max_output = 64000
+input = 1.0
+cached = 0.1
+output = 5.0
+reasoning = true
+tools = true
+temperature = true
+caching = true
+
+[[provider]]
+id = "openrouter"
+label = "OpenRouter"
+wire = "openai"
+base_url = "https://openrouter.ai/api/v1"
+key_env = "OPENROUTER_API_KEY"
+
+[[provider]]
+id = "deepseek"
+label = "DeepSeek"
+wire = "openai"
+base_url = "https://api.deepseek.com/v1"
+key_env = "DEEPSEEK_API_KEY"
+
+[[provider.model]]
+id = "deepseek-chat"
+name = "DeepSeek Chat"
+context = 128000
+max_output = 8192
+input = 0.27
+cached = 0.07
+output = 1.1
+tools = true
+temperature = true
+caching = true
+
+[[provider.model]]
+id = "deepseek-reasoner"
+name = "DeepSeek Reasoner"
+context = 128000
+max_output = 65536
+input = 0.55
+cached = 0.14
+output = 2.19
+reasoning = true
+tools = true
+temperature = true
+caching = true
+
+[[provider]]
+id = "google"
+label = "Google Gemini"
+wire = "openai"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+key_env = "GEMINI_API_KEY"
+
+[[provider.model]]
+id = "gemini-2.5-flash"
+name = "Gemini 2.5 Flash"
+context = 1048576
+max_output = 65536
+input = 0.3
+cached = 0.075
+output = 2.5
+tools = true
+temperature = true
+caching = true
+
+[[provider.model]]
+id = "gemini-2.5-pro"
+name = "Gemini 2.5 Pro"
+context = 1048576
+max_output = 65536
+input = 1.25
+cached = 0.31
+output = 10.0
+reasoning = true
+tools = true
+temperature = true
+caching = true
+
+[[provider]]
+id = "groq"
+label = "Groq"
+wire = "openai"
+base_url = "https://api.groq.com/openai/v1"
+key_env = "GROQ_API_KEY"
+
+[[provider]]
+id = "mistral"
+label = "Mistral"
+wire = "openai"
+base_url = "https://api.mistral.ai/v1"
+key_env = "MISTRAL_API_KEY"
+
+[[provider]]
+id = "xai"
+label = "xAI"
+wire = "openai"
+base_url = "https://api.x.ai/v1"
+key_env = "XAI_API_KEY"
+
+[[provider.model]]
+id = "grok-3-mini"
+name = "Grok 3 mini"
+context = 131072
+max_output = 8192
+input = 0.3
+cached = 0.075
+output = 0.5
+reasoning = true
+tools = true
+temperature = true
+caching = true
+
+[[provider]]
+id = "ollama"
+label = "Ollama"
+wire = "openai"
+base_url = "http://localhost:11434/v1"
+discover = true
+# A local server that is not running is not worth a note in the model list.
+quiet = true

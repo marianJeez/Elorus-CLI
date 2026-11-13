@@ -1,0 +1,33 @@
+description = "AUTO reads, edits and checks a file without asking"
+args = ["--mode", "auto", "-p", "fix the sum"]
+project = "calc"
+
+[[reply]]
+calls = [{ name = "read", arguments = '{"path": "src/calc.txt"}' }]
+
+[[reply]]
+calls = [{ name = "edit", arguments = '{"path": "src/calc.txt", "edits": [{"old_text": "2 + 2 = 5", "new_text": "2 + 2 = 4"}]}' }]
+
+[[reply]]
+calls = [{ name = "bash", arguments = '{"command": "cat src/calc.txt"}' }]
+
+[[reply]]
+text = 'Fixed: 2 + 2 = 4.'
+
+[expect]
+exit = 0
+stdout_contains = ["Fixed: 2 + 2 = 4."]
+stderr_contains = ["› read src/calc.txt", "› edit src/calc.txt", "› bash cat src/calc.txt"]
+files = { "src/calc.txt" = "2 + 2 = 4\n" }
+
+[[expect.requests]]
+index = 1
+message = -1
+role = "tool"
+contains = "2 + 2 = 5"
+
+[[expect.requests]]
+index = 3
+message = -1
+role = "tool"
+contains = "2 + 2 = 4"

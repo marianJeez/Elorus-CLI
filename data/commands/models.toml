@@ -1,0 +1,9 @@
+name = "models"
+summary = "Pick the model or preset for this session; on the command line, list them with prices and limits"
+usage = "models [--refresh] [--search <words>]"
+
+[text]
+footnote = "Prices are USD per 1M tokens; {current} is your default."
+missing = "Your default model `{model}` is not in this list; pick another with `--model`."
+none = "No model or preset matches `{query}`."
+presets = "Presets: {names} (`elorus presets` for what each picks)."

@@ -1,0 +1,8 @@
+# The first of `files` in the project root joins the system prompt, before <env>.
+files = ["AGENTS.md", "CLAUDE.md"]
+# {file} and {text} are filled in; {max} is `agent.instructions_bytes`.
+frame = """
+<project-instructions file="{file}">
+{text}
+</project-instructions>"""
+cut = "[The rest of {file} is left out: it runs past {max} bytes.]"

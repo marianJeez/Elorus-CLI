@@ -1,0 +1,32 @@
+mod agent;
+mod api;
+mod app;
+mod auth;
+mod battery;
+mod cli;
+mod commands;
+mod config;
+mod conversation;
+mod data;
+mod effort;
+mod forums;
+mod frontend;
+mod io;
+mod live;
+mod mcp;
+mod mode;
+mod models;
+mod permission;
+mod providers;
+mod release;
+mod session;
+mod snapshot;
+#[cfg(test)]
+mod testing;
+mod text;
+mod tools;
+
+#[tokio::main]
+async fn main() -> std::process::ExitCode {
+    cli::run().await
+}

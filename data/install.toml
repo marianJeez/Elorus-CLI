@@ -1,0 +1,21 @@
+# Install folder; never one that needs an administrator. {local}: local app data (%LOCALAPPDATA%);
+# {home}: home folder.
+[folder]
+windows = "{local}/Programs/elorus"
+unix = "{home}/.local/bin"
+
+# The Apps & Features entry on Windows, under
+# HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\{key}.
+[entry]
+key = "elorus"
+name = "elorus"
+publisher = "elorus.sh"
+
+[text]
+offer = "Install elorus to {dir} and put it on your PATH, so `elorus` works in any terminal?"
+installed = "Installed to {dir}."
+added = " Open a new terminal and type elorus."
+already = " elorus works in any terminal."
+profile = " {dir} is not on your PATH yet; add it in your shell's profile: export PATH=\"{dir}:$PATH\""
+uninstalled = "Uninstalled from {dir}. Keys and sessions stay in {home}; delete it to remove them."
+missing = "elorus is not installed at {dir}."

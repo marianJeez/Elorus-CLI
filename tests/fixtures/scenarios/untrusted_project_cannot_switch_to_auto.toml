@@ -1,0 +1,21 @@
+description = "An untrusted project's `mode = \"auto\"` is ignored with a warning, so the edit is still asked"
+args = ["-p", "fix the sum"]
+project = "calc"
+project_files = { ".elorus/config.toml" = "mode = \"auto\"\n" }
+
+[[reply]]
+calls = [{ name = "bash", arguments = '{"command": "sed -i s/5/4/ src/calc.txt"}' }]
+
+[[reply]]
+text = 'The plan is ready.'
+
+[expect]
+exit = 0
+stderr_contains = ["ignoring mode = \"auto\"", "isn't trusted"]
+files = { "src/calc.txt" = "2 + 2 = 5\n" }
+
+[[expect.requests]]
+index = 1
+message = -1
+role = "tool"
+contains = "nobody can answer"

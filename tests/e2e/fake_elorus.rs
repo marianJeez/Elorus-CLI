@@ -1,0 +1,538 @@
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+
+use axum::Router;
+use axum::extract::{Path, Request, State};
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use futures_util::StreamExt;
+use serde_json::{Value, json};
+
+const MODELS: &str = include_str!("../fixtures/api/models.json");
+const USAGE: &str = include_str!("../fixtures/api/usage.json");
+
+/// Keys the fake accepts, and what each stands for.
+pub const ENV_KEY: &str = "test-key";
+pub const DEVICE_KEY: &str = "device-key-9999";
+pub const ACCOUNT_NUMBER: &str = "1234567890123456";
+/// Each accepted key as `/api/me/keys` lists it: the key, its reference, name and hint.
+const KEYS: [(&str, &str, &str, &str); 3] = [
+    (ACCOUNT_NUMBER, "000000000001", "account", "•••• 3456"),
+    (DEVICE_KEY, "000000000002", "laptop", "•••• 9999"),
+    (ENV_KEY, "000000000003", "ci", "•••• -key"),
+];
+/// The one password the fake forum's Tapatalk plugin accepts, and the session it hands back.
+pub const FORUM_PASSWORD: &str = "hunter2";
+pub const FORUM_COOKIE: &str = "bbsessionhash=fake; path=/; HttpOnly";
+/// Where the fake forum lives on the fake server.
+pub const FORUM_PATH: &str = "/forum";
+
+/// One scripted reply to a chat request.
+pub enum Reply {
+    /// The model says this and stops.
+    Text(String),
+    /// The model makes these calls, one frame each, and stops for their results.
+    Calls(Vec<Call>),
+    /// A raw SSE fixture from tests/fixtures/sse/, for a stream the template cannot make.
+    Sse(String),
+    /// A JSON error envelope with this status and `error.type`.
+    Error {
+        status: u16,
+        kind: String,
+        retry_after: Option<u64>,
+    },
+    /// An error that sends its headers (retry at once) and the start of its body, then nothing.
+    Stall { status: u16 },
+}
+
+#[derive(Default)]
+struct Inner {
+    /// This server's address, filled in for `{base}` so a scripted model can fetch from it.
+    base: String,
+    /// The sandbox's elorus home, filled in as `{home}`, with `/` separators. `{plan_file}` is
+    /// the session's plan, found under it in the request.
+    home: String,
+    paths: Vec<String>,
+    chat_bodies: Vec<Value>,
+    script: VecDeque<Reply>,
+    /// Answers to pairing polls before the approval, in order.
+    pair_polls: VecDeque<PairPoll>,
+    pair_collected: bool,
+    /// Signups to refuse with 428 before accepting one.
+    stale_proofs: usize,
+    /// What `/api/me` answers a known key; `None` is a funded account with no plan.
+    me: Option<Value>,
+    /// Keys revoked through `/api/me/keys/{ref}/revoke`; each is refused from then on.
+    revoked: Vec<&'static str>,
+}
+
+type Shared = Arc<Mutex<Inner>>;
+
+/// One scripted answer to a pairing poll.
+pub enum PairPoll {
+    Pending,
+    Error { status: u16, kind: &'static str },
+}
+
+/// A local stand-in for elorus: serves fixtures, follows a script, records what it was asked.
+pub struct Fake {
+    pub url: String,
+    inner: Shared,
+}
+
+/// A tool call the scripted model makes.
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Call {
+    pub name: String,
+    /// As the model sends them: JSON text, or not (a model can cut its arguments short).
+    pub arguments: String,
+}
+
+impl Reply {
+    pub fn sse(name: &str) -> Self {
+        Self::Sse(name.to_owned())
+    }
+
+    pub fn text(text: &str) -> Self {
+        Self::Text(text.to_owned())
+    }
+
+    pub fn call(name: &str, arguments: &str) -> Self {
+        Self::Calls(vec![Call {
+            name: name.to_owned(),
+            arguments: arguments.to_owned(),
+        }])
+    }
+}
+
+/// The stream every templated reply makes: its frames, the finish, the usage and the end,
+/// with `fill` applied to what the model says.
+/// CEILING: twin of agent/run.rs's test turns, and the forum replies below of
+/// forums/mobiquo.rs's fake; elorus is bin-only, so see src/testing.rs for the upgrade.
+fn stream(reply: &Reply, fill: impl Fn(&str) -> String) -> Option<String> {
+    let (mut frames, finish) = match reply {
+        Reply::Text(text) => (
+            vec![json!({"choices": [{"index": 0, "delta": {"content": fill(text)}}]})],
+            "stop",
+        ),
+        Reply::Calls(calls) => (
+            calls
+                .iter()
+                .enumerate()
+                .map(|(i, call)| {
+                    let call = json!({"index": i, "id": format!("c{}", i + 1), "type": "function",
+                        "function": {"name": call.name, "arguments": fill(&call.arguments)}});
+                    json!({"choices": [{"index": 0, "delta": {"tool_calls": [call]}}]})
+                })
+                .collect(),
+            "tool_calls",
+        ),
+        _ => return None,
+    };
+    frames.push(json!({"choices": [{"index": 0, "delta": {}, "finish_reason": finish}]}));
+    frames.push(json!({"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 10}}));
+    let mut out: String = frames.iter().map(|f| format!("data: {f}\n\n")).collect();
+    out.push_str("data: [DONE]\n\n");
+    Some(out)
+}
+
+impl Fake {
+    pub async fn start() -> Self {
+        let inner: Shared = Arc::default();
+        let app = Router::new()
+            .route("/v1/models", get(models))
+            .route("/v1/chat/completions", post(chat))
+            .route("/api/me", get(me))
+            .route("/api/me/keys", get(me_keys))
+            .route("/api/me/usage", get(me_usage))
+            .route("/api/me/balance-fallback", post(me_fallback))
+            .route("/api/me/keys/{reference}/revoke", post(me_key_revoke))
+            .route("/api/pair/start", post(pair_start))
+            .route("/api/pair/{code}", get(pair_poll))
+            .route("/api/pow", get(pow))
+            .route("/api/signup", post(signup))
+            .route("/web/ok", get(web_ok))
+            .route("/web/blocked", get(web_blocked))
+            .route("/forum/mobiquo/mobiquo.php", post(mobiquo))
+            .route("/mcp", post(mcp))
+            .layer(middleware::from_fn_with_state(inner.clone(), record))
+            .with_state(inner.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        inner.lock().unwrap().base = url.clone();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        Self { url, inner }
+    }
+
+    /// Where `{home}` in a scripted reply points.
+    pub fn set_home(&self, home: &std::path::Path) {
+        self.inner.lock().unwrap().home = home.to_string_lossy().replace('\\', "/");
+    }
+
+    pub fn script(&self, replies: impl IntoIterator<Item = Reply>) {
+        self.inner.lock().unwrap().script.extend(replies);
+    }
+
+    /// How many polls answer "pending" before the pairing is approved.
+    pub fn pair_after(&self, pending: usize) {
+        self.pair_polls((0..pending).map(|_| PairPoll::Pending));
+    }
+
+    /// Polls answer these, in order, before the pairing is approved.
+    pub fn pair_polls(&self, polls: impl IntoIterator<Item = PairPoll>) {
+        self.inner.lock().unwrap().pair_polls.extend(polls);
+    }
+
+    /// What `/api/me` answers from now on, as elorus words it.
+    pub fn set_me(&self, me: Value) {
+        self.inner.lock().unwrap().me = Some(me);
+    }
+
+    pub fn stale_proofs(&self, count: usize) {
+        self.inner.lock().unwrap().stale_proofs = count;
+    }
+
+    pub fn hits(&self, path: &str) -> usize {
+        let inner = self.inner.lock().unwrap();
+        inner.paths.iter().filter(|p| *p == path).count()
+    }
+
+    pub fn chat_bodies(&self) -> Vec<Value> {
+        self.inner.lock().unwrap().chat_bodies.clone()
+    }
+}
+
+async fn record(State(inner): State<Shared>, req: Request, next: Next) -> Response {
+    inner
+        .lock()
+        .unwrap()
+        .paths
+        .push(req.uri().path().to_owned());
+    next.run(req).await
+}
+
+fn bearer(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+}
+
+fn authorized(inner: &Shared, headers: &HeaderMap) -> bool {
+    let bearer = bearer(headers);
+    let revoked = inner
+        .lock()
+        .unwrap()
+        .revoked
+        .iter()
+        .any(|k| Some(*k) == bearer);
+    matches!(bearer, Some(ENV_KEY | DEVICE_KEY | ACCOUNT_NUMBER)) && !revoked
+}
+
+fn error(status: u16, kind: &str, retry_after: Option<u64>) -> Response {
+    let mut resp = (
+        StatusCode::from_u16(status).unwrap(),
+        [("x-request-id", "req_fake")],
+        axum::Json(json!({"error": {"message": format!("fake {kind}"), "type": kind}})),
+    )
+        .into_response();
+    if let Some(secs) = retry_after {
+        resp.headers_mut()
+            .insert(header::RETRY_AFTER, secs.to_string().parse().unwrap());
+    }
+    resp
+}
+
+/// An MCP server over streamable HTTP with one tool, `echo`: it opens session `fake-session` at
+/// `initialize` and turns away anything later that does not carry it.
+async fn mcp(headers: HeaderMap, axum::Json(body): axum::Json<Value>) -> Response {
+    let method = body["method"].as_str().unwrap_or_default();
+    let session = headers.get("mcp-session-id").and_then(|v| v.to_str().ok());
+    if method != "initialize" && session != Some("fake-session") {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let Some(id) = body.get("id").cloned() else {
+        return StatusCode::ACCEPTED.into_response();
+    };
+    let result = match method {
+        "initialize" => json!({"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}}),
+        "tools/list" => json!({"tools": [{"name": "echo", "description": "Says back its text.",
+            "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}}}]}),
+        "tools/call" => {
+            let text = &body["params"]["arguments"]["text"];
+            json!({"content": [{"type": "text", "text": text}]})
+        }
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let message = json!({"jsonrpc": "2.0", "id": id, "result": result});
+    let mut response = axum::Json(message).into_response();
+    if method == "initialize" {
+        let session = header::HeaderValue::from_static("fake-session");
+        response.headers_mut().insert("mcp-session-id", session);
+    }
+    response
+}
+
+/// A plain page, as a documentation site serves it.
+async fn web_ok() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        "<html><head><title>Widget docs</title></head><body>\
+         <h1>Widget API</h1><p>The widget spins at 3 rpm.</p></body></html>",
+    )
+}
+
+/// A forum's Tapatalk plugin, as far as logging in: `FORUM_PASSWORD` gets a session cookie, any
+/// other password the refusal a real plugin sends.
+async fn mobiquo(body: String) -> Response {
+    use base64::Engine;
+    let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
+    let member = |name: &str, value: &str| {
+        format!("<member><name>{name}</name><value>{value}</value></member>")
+    };
+    let ok = body.contains(&b64(FORUM_PASSWORD));
+    let members = if ok {
+        member("result", "<boolean>1</boolean>")
+            + &member("username", &format!("<base64>{}</base64>", b64("crow")))
+    } else {
+        member("result", "<boolean>0</boolean>")
+            + &member(
+                "result_text",
+                &format!("<base64>{}</base64>", b64("Wrong password")),
+            )
+    };
+    let xml = format!(
+        "<?xml version=\"1.0\"?><methodResponse><params><param><value><struct>{members}\
+         </struct></value></param></params></methodResponse>"
+    );
+    let mut resp = ([(header::CONTENT_TYPE, "text/xml")], xml).into_response();
+    if ok {
+        resp.headers_mut()
+            .insert(header::SET_COOKIE, FORUM_COOKIE.parse().unwrap());
+    }
+    resp
+}
+
+/// What Cloudflare serves while it challenges a client: 403, its mitigation header, and an
+/// interstitial that must never reach the model as if it were the page.
+async fn web_blocked() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::HeaderName::from_static("cf-mitigated"), "challenge"),
+        ],
+        "<html><head><title>Just a moment...</title></head><body>\
+         <script>window._cf_chl_opt={cType:'managed'};</script>\
+         <noscript>Enable JavaScript and cookies to continue</noscript></body></html>",
+    )
+        .into_response()
+}
+
+async fn models() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "application/json")], MODELS)
+}
+
+async fn chat(State(inner): State<Shared>, headers: HeaderMap, body: String) -> Response {
+    if !authorized(&inner, &headers) {
+        return error(401, "invalid_api_key", None);
+    }
+    let (reply, base, home) = {
+        let mut inner = inner.lock().unwrap();
+        inner
+            .chat_bodies
+            .push(serde_json::from_str(&body).unwrap_or(Value::Null));
+        (
+            inner.script.pop_front(),
+            inner.base.clone(),
+            inner.home.clone(),
+        )
+    };
+    // The session's plan file, as the conversation names it: `<home>/plans/<session>.md`.
+    let plans = format!("{home}/plans/");
+    let plan_file = body
+        .find(&plans)
+        .filter(|_| !home.is_empty())
+        .and_then(|at| Some(&body[at..at + body[at..].find(".md")? + 3]))
+        .unwrap_or_default();
+    let fill = |text: &str| {
+        text.replace("{base}", &base)
+            .replace("{home}", &home)
+            .replace("{plan_file}", plan_file)
+    };
+    let sse = |text: String| {
+        (
+            [
+                (header::CONTENT_TYPE, "text/event-stream"),
+                (header::HeaderName::from_static("x-request-id"), "req_fake"),
+            ],
+            text,
+        )
+            .into_response()
+    };
+    match reply {
+        Some(reply @ (Reply::Text(_) | Reply::Calls(_))) => {
+            sse(stream(&reply, fill).expect("a templated reply"))
+        }
+        Some(Reply::Sse(name)) => {
+            let path = crate::common::tests_path("fixtures/sse").join(name);
+            let text =
+                std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("{}", path.display()));
+            sse(fill(&text))
+        }
+        Some(Reply::Error {
+            status,
+            kind,
+            retry_after,
+        }) => error(status, &kind, retry_after),
+        Some(Reply::Stall { status }) => {
+            let start =
+                futures_util::stream::once(async { Ok::<_, std::io::Error>(r#"{"error":"#) });
+            let body = axum::body::Body::from_stream(start.chain(futures_util::stream::pending()));
+            (
+                StatusCode::from_u16(status).unwrap(),
+                [("x-request-id", "req_fake"), ("retry-after", "0")],
+                body,
+            )
+                .into_response()
+        }
+        None => error(500, "unscripted", None),
+    }
+}
+
+async fn me(State(inner): State<Shared>, headers: HeaderMap) -> Response {
+    if !authorized(&inner, &headers) {
+        return error(401, "invalid_api_key", None);
+    }
+    let me = inner.lock().unwrap().me.clone();
+    axum::Json(me.unwrap_or_else(|| json!({"balance_microdollars": 12_300_000, "can_spend": true})))
+        .into_response()
+}
+
+async fn me_usage(State(inner): State<Shared>, headers: HeaderMap) -> Response {
+    if !authorized(&inner, &headers) {
+        return error(401, "invalid_api_key", None);
+    }
+    ([(header::CONTENT_TYPE, "application/json")], USAGE).into_response()
+}
+
+/// Sets `spend_balance_when_dry` in what `/api/me` answers from then on.
+async fn me_fallback(State(inner): State<Shared>, headers: HeaderMap, body: String) -> Response {
+    if !authorized(&inner, &headers) {
+        return error(401, "invalid_api_key", None);
+    }
+    let Some(on) = serde_json::from_str::<Value>(&body)
+        .ok()
+        .and_then(|b| b["on"].as_bool())
+    else {
+        return error(400, "bad_request", None);
+    };
+    let mut inner = inner.lock().unwrap();
+    let me = inner
+        .me
+        .get_or_insert_with(|| json!({"balance_microdollars": 12_300_000, "can_spend": true}));
+    me["spend_balance_when_dry"] = json!(on);
+    axum::Json(json!({"ok": true, "spend_balance_when_dry": on})).into_response()
+}
+
+async fn me_keys(State(inner): State<Shared>, headers: HeaderMap) -> Response {
+    if !authorized(&inner, &headers) {
+        return error(401, "invalid_api_key", None);
+    }
+    let revoked = inner.lock().unwrap().revoked.clone();
+    let keys: Vec<Value> = KEYS
+        .iter()
+        .filter(|(key, ..)| !revoked.contains(key))
+        .map(|(key, reference, name, hint)| {
+            json!({"ref": reference, "name": name, "hint": hint,
+                "created_at": "2026-10-01T09:00:00+00:00", "current": bearer(&headers) == Some(key)})
+        })
+        .collect();
+    axum::Json(json!({ "keys": keys })).into_response()
+}
+
+async fn me_key_revoke(
+    State(inner): State<Shared>,
+    Path(reference): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !authorized(&inner, &headers) {
+        return error(401, "invalid_api_key", None);
+    }
+    let mut inner = inner.lock().unwrap();
+    let Some((key, ..)) = KEYS
+        .iter()
+        .find(|(key, r, ..)| *r == reference && !inner.revoked.contains(key))
+    else {
+        return error(404, "not_found", None);
+    };
+    if bearer(&headers) == Some(key) {
+        return error(409, "cannot_revoke_current", None);
+    }
+    inner.revoked.push(key);
+    axum::Json(json!({"ok": true})).into_response()
+}
+
+async fn pair_start() -> impl IntoResponse {
+    axum::Json(json!({"device_code": "dev1", "user_code": "ABCD-1234", "ttl": 60}))
+}
+
+async fn pair_poll(State(inner): State<Shared>, Path(code): Path<String>) -> Response {
+    let mut inner = inner.lock().unwrap();
+    if code != "dev1" || inner.pair_collected {
+        return error(410, "pair_expired", None);
+    }
+    match inner.pair_polls.pop_front() {
+        Some(PairPoll::Pending) => {
+            return (
+                StatusCode::ACCEPTED,
+                axum::Json(json!({"status": "pending"})),
+            )
+                .into_response();
+        }
+        Some(PairPoll::Error { status, kind }) => return error(status, kind, None),
+        None => {}
+    }
+    inner.pair_collected = true;
+    axum::Json(json!({"status": "ready", "api_key": DEVICE_KEY})).into_response()
+}
+
+const POW_BITS: u32 = 8;
+
+async fn pow() -> impl IntoResponse {
+    axum::Json(json!({"challenge": "fakechallenge", "bits": POW_BITS, "ttl": 60}))
+}
+
+async fn signup(State(inner): State<Shared>, headers: HeaderMap) -> Response {
+    use sha2::{Digest, Sha256};
+    let proof = headers
+        .get("x-pow")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    let Some((challenge, nonce)) = proof.split_once('.') else {
+        return error(428, "pow_required", None);
+    };
+    let hash = Sha256::digest(format!("{challenge}:{nonce}"));
+    let zeros = hash
+        .iter()
+        .scan(true, |counting, b| {
+            let bits = if *counting { b.leading_zeros() } else { 0 };
+            *counting &= *b == 0;
+            Some(bits)
+        })
+        .sum::<u32>();
+    let mut inner = inner.lock().unwrap();
+    if challenge != "fakechallenge" || zeros < POW_BITS || inner.stale_proofs > 0 {
+        inner.stale_proofs = inner.stale_proofs.saturating_sub(1);
+        return error(428, "pow_required", None);
+    }
+    axum::Json(json!({
+        "account_number": ACCOUNT_NUMBER,
+        "formatted": "1234 5678 9012 3456",
+        "api_base": "https://api.elorus.sh/v1"
+    }))
+    .into_response()
+}

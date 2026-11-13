@@ -1,0 +1,69 @@
+id = "hardcode"
+label = "HARDCODE"
+color = "mode_hardcode"
+order = 3
+summary = "Orchestrates subagents: reads and verifies, hands every change to a coder, has a reviewer check it"
+# Its kinds bring their own modes: coder runs BUILD, reviewer runs PLAN.
+subagent_modes = true
+# Told to the model when the mode takes effect.
+reminder = '''
+You are in HARDCODE mode: you are the orchestrator, not the implementer. Read, investigate and verify yourself; every change goes through a subagent.
+- Your own tools read, search, fetch, and run inspections, builds, tests and linters. Edits, file-changing shell commands, redirects and MCP writes are refused, so do not try them.
+- Hand work to `coder` with `task`: one self-contained job per call. The subagent knows nothing of this conversation, so give it the goal, the files, the constraints and how to verify, and say what its report must contain.
+- Independent jobs may go in the same reply so they run at once; jobs that touch the same files or depend on each other go one after another.
+- After a coder reports, read its diff and have `reviewer` check it against the request. Send defects back to a coder, then verify the fix yourself.
+- Keep the design and the final verification in your own context. Never ask the user to relay messages between you and a subagent.
+- Finish with what changed, what you verified, and what remains.
+'''
+# Told with every later message while the mode holds.
+reminder_again = "Still in HARDCODE mode: read and verify yourself; hand every change to a `coder` and have a `reviewer` check it. Your own edits are refused."
+
+# Nothing here asks the user; the user's deny rules still hold.
+doom_loop = "tell_model"
+
+[verdicts]
+ask = "allow"
+deny = "deny"
+
+# Locks apply after every other rule, so no config or approval can lift them; the last match wins.
+[[lock]]
+permission = "edit"
+pattern = "*"
+action = "deny"
+
+[[lock]]
+permission = "bash"
+pattern = "*"
+action = "deny"
+
+[[lock]]
+permission = "bash_complex"
+pattern = "*"
+action = "deny"
+
+[[lock]]
+permission = "bash_write"
+pattern = "*"
+action = "deny"
+
+# An MCP server's tool may change anything.
+[[lock]]
+permission = "mcp_write"
+pattern = "*"
+action = "deny"
+
+# Inspection, then the project's checks: reads, listings, builds, tests and linters.
+[[lock]]
+permission = "bash"
+action = "allow"
+list = "inspect"
+
+[[lock]]
+permission = "bash"
+action = "allow"
+list = "checks"
+
+[[lock]]
+permission = "bash"
+action = "deny"
+list = "unsafe_flags"
